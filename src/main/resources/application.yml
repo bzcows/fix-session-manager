@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: fix-session-manager
+  config:
+    import: optional:file:./config/fix-sessions.yaml
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+kafka:
+  bootstrap:
+    servers: localhost:9092
+
+# Hazelcast OSS Configuration
+hazelcast:
+  cluster:
+    name: fix-session-cluster
+  backup:
+    enabled: true
+    dir: ./data/hazelcast
+    interval: 60000  # Backup every 60 seconds
+
+logging:
+  level:
+    root: INFO
+    com.fixgateway: DEBUG
+    quickfix: INFO
+    org.apache.camel: INFO
+  file:
+    name: ./logs/fix-session-manager.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"

@@ -1,0 +1,29 @@
+fix:
+  sessions:
+    - sessionId: "FIX.4.4:GTWY->BANZ"
+      type: "ACCEPTOR"
+      senderCompId: "GTWY"
+      targetCompId: "BANZ"
+      host: "0.0.0.0"
+      port: 9881
+      fixVersion: "FIX.4.4"
+      dictionary: "FIX44.xml"
+      enabled: true
+      heartbeatInterval: 30
+      resetOnLogon: true
+      resetOnLogout: true
+      resetOnDisconnect: true
+
+    - sessionId: "FIX.4.4:GTWY->EXEC"
+      type: "INITIATOR"
+      senderCompId: "GTWY"
+      targetCompId: "EXEC"
+      host: "localhost"
+      port: 9880
+      fixVersion: "FIX.4.4"
+      dictionary: "FIX44.xml"
+      enabled: true
+      heartbeatInterval: 30
+      resetOnLogon: true
+      resetOnLogout: true
+      resetOnDisconnect: true

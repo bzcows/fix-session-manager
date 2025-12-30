@@ -1,0 +1,54 @@
+services:
+  redpanda:
+    image: 'docker.redpanda.com/redpandadata/redpanda:latest'
+    container_name: fix-gateway-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp
+      - '1'
+      - --memory
+      - '1G'
+      - --reserve-memory
+      - '0M'
+      - --overprovisioned
+      - --node-id
+      - '0'
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+      - --pandaproxy-addr
+      - PLAINTEXT://0.0.0.0:28082,OUTSIDE://0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - PLAINTEXT://redpanda:28082,OUTSIDE://localhost:8082
+      - --schema-registry-addr
+      - PLAINTEXT://0.0.0.0:28081,OUTSIDE://0.0.0.0:8081
+    ports:
+      - '9092:9092'
+      - '8082:8082'
+      - '8081:8081'
+      - '28081:28081'
+      - '29092:29092'
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+  kafka-ui:
+    image: 'provectuslabs/kafka-ui:latest'
+    container_name: fix-gateway-kafka-ui
+    ports:
+      - '9180:8080'
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local-redpanda
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=redpanda:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER= # Empty for Redpanda
+    depends_on:
+      - redpanda
+
+volumes:
+  redpanda_data:
+    driver: local
+
+networks:
+  default:
+    name: fix-gateway-network
