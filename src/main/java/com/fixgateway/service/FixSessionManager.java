@@ -84,9 +84,11 @@ public class FixSessionManager {
         settings.setString(sessionID, Session.SETTING_START_TIME, "00:00:00");
         settings.setString(sessionID, Session.SETTING_END_TIME, "00:00:00");
         settings.setLong(sessionID, Session.SETTING_HEARTBTINT, config.getHeartbeatInterval());
-        settings.setBool(sessionID, Session.SETTING_RESET_ON_LOGON, config.isResetOnLogon());
-        settings.setBool(sessionID, Session.SETTING_RESET_ON_LOGOUT, config.isResetOnLogout());
-        settings.setBool(sessionID, Session.SETTING_RESET_ON_DISCONNECT, config.isResetOnDisconnect());
+        // IMPORTANT: Disable automatic resets to allow crash-recovery using persisted MessageStore
+        // Any reset here will invoke MessageStore.reset() and force MsgSeqNum back to 1
+        settings.setBool(sessionID, Session.SETTING_RESET_ON_LOGON, false);
+        settings.setBool(sessionID, Session.SETTING_RESET_ON_LOGOUT, false);
+        settings.setBool(sessionID, Session.SETTING_RESET_ON_DISCONNECT, false);
         
         // Log the settings for debugging
         log.debug("Session settings created for {}: ConnectionType={}, Host={}, Port={}",

@@ -106,6 +106,14 @@ public class FixApplication implements Application {
             String directEndpoint = String.format("direct:fix-inbound-%s-%s",
                 sessionID.getSenderCompID(), sessionID.getTargetCompID());
             
+            // DEBUG: validate direct consumer existence before send
+            boolean hasEndpoint = camelContext.hasEndpoint(directEndpoint) != null;
+            log.info("[DEBUG] Sending FIX fromApp to {} | direct consumer exists={}", directEndpoint, hasEndpoint);
+
+            camelContext.getRoutes().forEach(r ->
+                log.info("[DEBUG] ACTIVE ROUTE id={} from={}", r.getId(), r.getEndpoint().getEndpointUri())
+            );
+
             producerTemplate.sendBody(directEndpoint, envelope);
             
             log.info("Forwarded FIX message to direct endpoint {}: {} - MsgType: {}",
