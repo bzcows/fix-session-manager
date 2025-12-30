@@ -50,7 +50,8 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
             .logStackTrace(true)
             .logExhausted(true));
 
-        // Create routes for each enabled session
+        // Create routes for each enabled session but DO NOT auto-start them.
+        // Routes will be started only after the corresponding FIX session is fully logged on.
         for (FixSessionConfig config : sessionsProperties.getSessions()) {
             if (!config.isEnabled()) {
                 continue;
@@ -89,6 +90,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
 
         from(directEndpoint)
             .routeId(routeId)
+            .autoStartup(false)
             .log(LoggingLevel.DEBUG, "Publishing inbound FIX message to Kafka topic: " + inputTopic)
             .to(kafkaProducerUri);
 
@@ -132,6 +134,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         
         from(kafkaUri)
             .routeId(routeId)
+            .autoStartup(false)
             .log(LoggingLevel.INFO, "Received message from Kafka topic: " + outputTopic)
             .unmarshal().json(JsonLibrary.Jackson, MessageEnvelope.class)
             .process(exchange -> {

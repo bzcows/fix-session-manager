@@ -17,6 +17,7 @@ import java.util.Set;
 public class FixApplication implements Application {
 
     private final ProducerTemplate producerTemplate;
+    private final org.apache.camel.CamelContext camelContext;
     
     // Admin message types to filter
     private static final Set<String> ADMIN_MSG_TYPES = Set.of(
@@ -37,11 +38,29 @@ public class FixApplication implements Application {
     @Override
     public void onLogon(SessionID sessionID) {
         log.info("FIX Session logged on: {}", sessionID);
+        // Start Kafka routes only after FIX session is fully logged on
+        String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
+        try {
+            camelContext.getRouteController().startRoute("fix-to-kafka-" + sessionKey);
+            camelContext.getRouteController().startRoute("kafka-to-fix-" + sessionKey);
+            log.info("Started Kafka routes for session {}", sessionKey);
+        } catch (Exception e) {
+            log.error("Failed to start Kafka routes for session {}", sessionKey, e);
+        }
     }
 
     @Override
     public void onLogout(SessionID sessionID) {
         log.info("FIX Session logged out: {}", sessionID);
+        // Stop Kafka routes when FIX session goes down
+        String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
+        try {
+            camelContext.getRouteController().stopRoute("fix-to-kafka-" + sessionKey);
+            camelContext.getRouteController().stopRoute("kafka-to-fix-" + sessionKey);
+            log.info("Stopped Kafka routes for session {}", sessionKey);
+        } catch (Exception e) {
+            log.warn("Failed to stop Kafka routes for session {}", sessionKey, e);
+        }
     }
 
     @Override
