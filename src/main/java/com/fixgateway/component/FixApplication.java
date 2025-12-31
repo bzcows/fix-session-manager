@@ -18,6 +18,7 @@ public class FixApplication implements Application {
 
     private final ProducerTemplate producerTemplate;
     private final org.apache.camel.CamelContext camelContext;
+    private final com.fixgateway.service.SessionOwnershipService ownershipService;
     
     // Admin message types to filter
     private static final Set<String> ADMIN_MSG_TYPES = Set.of(
@@ -38,7 +39,13 @@ public class FixApplication implements Application {
     @Override
     public void onLogon(SessionID sessionID) {
         log.info("FIX Session logged on: {}", sessionID);
-        // Start Kafka routes only after FIX session is fully logged on
+
+        // HA SAFETY: only the session owner may start Camel routes
+        if (!ownershipService.isOwner(sessionID)) {
+            log.info("Node is not owner for {}, skipping route startup", sessionID);
+            return;
+        }
+
         String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
         try {
             camelContext.getRouteController().startRoute("fix-to-kafka-" + sessionKey);
@@ -52,7 +59,12 @@ public class FixApplication implements Application {
     @Override
     public void onLogout(SessionID sessionID) {
         log.info("FIX Session logged out: {}", sessionID);
-        // Stop Kafka routes when FIX session goes down
+
+        // HA SAFETY: only owner manages routes
+        if (!ownershipService.isOwner(sessionID)) {
+            return;
+        }
+
         String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
         try {
             camelContext.getRouteController().stopRoute("fix-to-kafka-" + sessionKey);
@@ -76,12 +88,21 @@ public class FixApplication implements Application {
 
     @Override
     public void toApp(Message message, SessionID sessionID) throws DoNotSend {
+        // HA safety: only current owner may send application messages
+        if (!ownershipService.isOwner(sessionID)) {
+            throw new DoNotSend();
+        }
         log.debug("Application message TO {}: {}", sessionID, message);
     }
 
     @Override
-    public void fromApp(Message message, SessionID sessionID) 
+    public void fromApp(Message message, SessionID sessionID)
             throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
+        // HA safety: drop messages if this node lost ownership
+        if (!ownershipService.isOwner(sessionID)) {
+            log.debug("Node is not owner for {}, dropping message", sessionID);
+            return;
+        }
         
         try {
             String msgType = message.getHeader().getString(MsgType.FIELD);
@@ -91,6 +112,10 @@ public class FixApplication implements Application {
                 log.debug("Filtering admin message type {} from {}", msgType, sessionID);
                 return;
             }
+
+            // Ensure routes are started before processing messages
+            String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
+            ensureRoutesStarted(sessionID, sessionKey);
 
             // Create envelope
             MessageEnvelope envelope = MessageEnvelope.builder()
@@ -105,22 +130,67 @@ public class FixApplication implements Application {
             // Send to direct endpoint (which routes to Kafka with proper brokers)
             String directEndpoint = String.format("direct:fix-inbound-%s-%s",
                 sessionID.getSenderCompID(), sessionID.getTargetCompID());
-            
-            // DEBUG: validate direct consumer existence before send
-            boolean hasEndpoint = camelContext.hasEndpoint(directEndpoint) != null;
-            log.info("[DEBUG] Sending FIX fromApp to {} | direct consumer exists={}", directEndpoint, hasEndpoint);
 
-            camelContext.getRoutes().forEach(r ->
-                log.info("[DEBUG] ACTIVE ROUTE id={} from={}", r.getId(), r.getEndpoint().getEndpointUri())
-            );
-
-            producerTemplate.sendBody(directEndpoint, envelope);
+            // Direct routes may not be fully started yet (HA takeover / async startup)
+            // Retry briefly to avoid DirectConsumerNotAvailableException
+            int attempts = 0;
+            while (true) {
+                try {
+                    producerTemplate.sendBody(directEndpoint, envelope);
+                    break;
+                } catch (org.apache.camel.CamelExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (!(cause instanceof org.apache.camel.component.direct.DirectConsumerNotAvailableException)
+                            || ++attempts >= 5) {
+                        throw e;
+                    }
+                    log.debug("Route not ready, retrying ({}/5)...", attempts);
+                    try {
+                        Thread.sleep(200L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                }
+            }
             
             log.info("Forwarded FIX message to direct endpoint {}: {} - MsgType: {}",
                 directEndpoint, sessionID, msgType);
             
         } catch (Exception e) {
             log.error("Error processing incoming FIX message from {}", sessionID, e);
+        }
+    }
+
+    /**
+     * Ensures Camel routes are started for the given session.
+     * This handles the case where messages arrive before onLogon() is called.
+     */
+    private void ensureRoutesStarted(SessionID sessionID, String sessionKey) {
+        try {
+            String fixToKafkaRoute = "fix-to-kafka-" + sessionKey;
+            String kafkaToFixRoute = "kafka-to-fix-" + sessionKey;
+            
+            // Check if routes exist and are not started
+            boolean fixToKafkaStarted = camelContext.getRouteController().getRouteStatus(fixToKafkaRoute).isStarted();
+            boolean kafkaToFixStarted = camelContext.getRouteController().getRouteStatus(kafkaToFixRoute).isStarted();
+            
+            if (!fixToKafkaStarted || !kafkaToFixStarted) {
+                log.info("Routes not started for session {}, starting now (fixToKafka={}, kafkaToFix={})",
+                    sessionKey, fixToKafkaStarted, kafkaToFixStarted);
+                
+                if (!fixToKafkaStarted) {
+                    camelContext.getRouteController().startRoute(fixToKafkaRoute);
+                    log.info("Started route: {}", fixToKafkaRoute);
+                }
+                if (!kafkaToFixStarted) {
+                    camelContext.getRouteController().startRoute(kafkaToFixRoute);
+                    log.info("Started route: {}", kafkaToFixRoute);
+                }
+            }
+        } catch (Exception e) {
+            log.error("Failed to ensure routes started for session {}", sessionKey, e);
+            throw new RuntimeException("Failed to start routes for session " + sessionKey, e);
         }
     }
 }

@@ -19,6 +19,10 @@ public class HazelcastConfig {
         Config config = new Config();
         config.setClusterName(clusterName);
         
+        // ---- HA (OSS-safe) ----
+        // NOTE: CP Subsystem is an Enterprise feature and is intentionally NOT used.
+        // Session ownership is coordinated using IMap + TTL-based leases.
+        
         // OPEN SOURCE ONLY - No enterprise features
         // Using in-memory storage with backup for HA
         
@@ -48,6 +52,14 @@ public class HazelcastConfig {
                 .setTimeToLiveSeconds(0)
                 .setMaxIdleSeconds(0);
         config.addMapConfig(sequenceConfig);
+
+        // Ownership map for FIX session leadership (OSS-safe, TTL-based leases)
+        MapConfig ownershipConfig = new MapConfig()
+                .setName("fix-session-ownership")
+                .setBackupCount(1)
+                .setAsyncBackupCount(0)
+                .setTimeToLiveSeconds(15);
+        config.addMapConfig(ownershipConfig);
 
         // Network configuration for single node (OSS)
         config.getNetworkConfig()

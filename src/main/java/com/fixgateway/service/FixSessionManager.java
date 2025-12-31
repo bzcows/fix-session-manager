@@ -24,37 +24,151 @@ public class FixSessionManager {
     private final FixApplication fixApplication;
     private final HazelcastMessageStoreFactory messageStoreFactory;
     private final HazelcastLogFactory logFactory;
+    private final SessionOwnershipService ownershipService;
     
     private final List<Acceptor> acceptors = new ArrayList<>();
     private final List<Initiator> initiators = new ArrayList<>();
+    /**
+     * Tracks FIX sessions currently active on this node to prevent duplicate startup
+     * from lease monitor + membership events.
+     */
+    private final java.util.Set<SessionID> activeSessions =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    @jakarta.annotation.PostConstruct
+    public void startLeaseMonitor() {
+        // Lease monitor is now ONLY responsible for renewals and fencing.
+        // Session startup is driven by ownership events.
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+            .scheduleAtFixedRate(this::monitorOwnership, 3, 3, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private void monitorOwnership() {
+        long now = System.currentTimeMillis();
+        for (FixSessionConfig config : sessionsProperties.getSessions()) {
+            SessionID sessionID = new SessionID(config.getFixVersion(),
+                    config.getSenderCompId(), config.getTargetCompId());
+
+            SessionOwnershipService.Ownership o = ownershipService.get(sessionID);
+
+            // No ownership info yet → do nothing
+            if (o == null) {
+                continue;
+            }
+
+            // Lease expired on remote owner -> stop local resources if any
+            if (!o.nodeId.equals(ownershipService.nodeId()) && o.leaseUntil < now) {
+                stopSession(sessionID);
+                continue;
+            }
+
+            // Renew lease if we are the owner
+            if (o.nodeId.equals(ownershipService.nodeId())) {
+                ownershipService.renew(sessionID);
+            }
+        }
+    }
+
+    private void startSessionForConfig(FixSessionConfig config) {
+        try {
+            SessionID sessionID = new SessionID(
+                config.getFixVersion(),
+                config.getSenderCompId(),
+                config.getTargetCompId());
+
+            if (!activeSessions.add(sessionID)) {
+                log.info("FIX session {} already active on this node, skipping start", sessionID);
+                return;
+            }
+
+            SessionSettings settings = createSessionSettings(config);
+            if ("ACCEPTOR".equalsIgnoreCase(config.getType())) {
+                startAcceptor(config, settings);
+            } else if ("INITIATOR".equalsIgnoreCase(config.getType())) {
+                startInitiator(config, settings);
+            }
+        } catch (Exception e) {
+            log.error("Failed to start FIX session on takeover: {}", config.getSessionId(), e);
+        }
+    }
+
+    private void stopSession(SessionID sessionID) {
+        activeSessions.remove(sessionID);
+        acceptors.removeIf(a -> {
+            try {
+                a.stop();
+            } catch (Exception e) {
+                log.warn("Error stopping acceptor for {}", sessionID, e);
+            }
+            return true;
+        });
+        initiators.removeIf(i -> {
+            try {
+                i.stop();
+            } catch (Exception e) {
+                log.warn("Error stopping initiator for {}", sessionID, e);
+            }
+            return true;
+        });
+    }
 
     @PostConstruct
     public void initialize() {
         log.info("Initializing FIX Sessions...");
+
+        // Register for ownership events to start/stop FIX sessions
+        ownershipService.registerListener(new SessionOwnershipService.OwnershipListener() {
+            @Override
+            public void onOwnershipAcquired(String sessionKey) {
+                FixSessionConfig config = findConfig(sessionKey);
+                if (config != null) {
+                    log.info("Ownership acquired event received, starting FIX session {}", sessionKey);
+                    startSessionForConfig(config);
+                }
+            }
+
+            @Override
+            public void onOwnershipLost(String sessionKey) {
+                FixSessionConfig config = findConfig(sessionKey);
+                if (config != null) {
+                    SessionID sessionID = new SessionID(config.getFixVersion(),
+                        config.getSenderCompId(), config.getTargetCompId());
+                    log.info("Ownership lost event received, stopping FIX session {}", sessionKey);
+                    stopSession(sessionID);
+                }
+            }
+        });
         
+        // Attempt initial ownership; actual startup is funneled through the same
+        // idempotent path used by Hazelcast ownership events
         for (FixSessionConfig config : sessionsProperties.getSessions()) {
             if (!config.isEnabled()) {
                 log.info("Session {} is disabled, skipping", config.getSessionId());
                 continue;
             }
+            SessionID sessionID = new SessionID(config.getFixVersion(),
+                    config.getSenderCompId(), config.getTargetCompId());
 
-            try {
-                SessionSettings settings = createSessionSettings(config);
-                
-                if ("ACCEPTOR".equalsIgnoreCase(config.getType())) {
-                    startAcceptor(config, settings);
-                } else if ("INITIATOR".equalsIgnoreCase(config.getType())) {
-                    startInitiator(config, settings);
-                } else {
-                    log.error("Unknown session type: {}", config.getType());
-                }
-            } catch (Exception e) {
-                log.error("Failed to start session: {}", config.getSessionId(), e);
+            if (ownershipService.tryAcquire(sessionID)) {
+                log.info("Initial ownership acquired for {}, starting session", config.getSessionId());
+                startSessionForConfig(config);
+            } else {
+                log.info("Node is not owner for {}, starting in standby mode", config.getSessionId());
             }
         }
         
         log.info("FIX Session initialization complete. Acceptors: {}, Initiators: {}", 
             acceptors.size(), initiators.size());
+    }
+
+    private FixSessionConfig findConfig(String sessionKey) {
+        for (FixSessionConfig cfg : sessionsProperties.getSessions()) {
+            String key = cfg.getFixVersion() + ":" + cfg.getSenderCompId() + "->" + cfg.getTargetCompId();
+            if (key.equals(sessionKey)) {
+                return cfg;
+            }
+        }
+        return null;
     }
 
     private SessionSettings createSessionSettings(FixSessionConfig config) throws ConfigError {
