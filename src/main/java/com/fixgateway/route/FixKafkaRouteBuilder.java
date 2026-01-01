@@ -22,7 +22,6 @@ import org.apache.camel.CamelContext;
 public class FixKafkaRouteBuilder extends RouteBuilder {
 
     private final FixSessionsProperties sessionsProperties;
-    private final SessionOwnershipService ownershipService;
     private final CamelContext camelContext;
     
     @Value("${kafka.bootstrap.servers:localhost:9092}")
@@ -30,19 +29,6 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
 
     @Override
     public void configure() throws Exception {
-        // Register for ownership events to control Kafka routes
-        ownershipService.registerListener(new SessionOwnershipService.OwnershipListener() {
-            @Override
-            public void onOwnershipAcquired(String sessionKey) {
-                startRoutes(sessionKey);
-            }
-
-            @Override
-            public void onOwnershipLost(String sessionKey) {
-                stopRoutes(sessionKey);
-            }
-        });
-        
         // Get brokers for DLQ configuration
         String brokers = kafkaBootstrapServers != null ? kafkaBootstrapServers : "localhost:9092";
         
@@ -79,25 +65,6 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         }
     }
 
-    private void startRoutes(String sessionKey) {
-        try {
-            camelContext.getRouteController().startRoute("fix-to-kafka-" + sessionKey);
-            camelContext.getRouteController().startRoute("kafka-to-fix-" + sessionKey);
-            log.info("Kafka routes started for FIX session {}", sessionKey);
-        } catch (Exception e) {
-            log.error("Failed to start Kafka routes for {}", sessionKey, e);
-        }
-    }
-
-    private void stopRoutes(String sessionKey) {
-        try {
-            camelContext.getRouteController().stopRoute("fix-to-kafka-" + sessionKey);
-            camelContext.getRouteController().stopRoute("kafka-to-fix-" + sessionKey);
-            log.info("Kafka routes stopped for FIX session {}", sessionKey);
-        } catch (Exception e) {
-            log.error("Failed to stop Kafka routes for {}", sessionKey, e);
-        }
-    }
 
     /**
      * FIX → Kafka (Inbound)

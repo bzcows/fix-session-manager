@@ -61,6 +61,15 @@ public class HazelcastConfig {
                 .setTimeToLiveSeconds(15);
         config.addMapConfig(ownershipConfig);
 
+        // Session assignment map for deterministic Active/Active sharding
+        MapConfig assignmentConfig = new MapConfig()
+                .setName("fix-session-assignments")
+                .setBackupCount(1)
+                .setAsyncBackupCount(0)
+                .setTimeToLiveSeconds(0) // never expire
+                .setMaxIdleSeconds(0);
+        config.addMapConfig(assignmentConfig);
+
         // Network configuration for single node (OSS)
         config.getNetworkConfig()
                 .setPort(5701)

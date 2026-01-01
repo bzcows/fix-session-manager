@@ -3,8 +3,10 @@ package com.fixgateway.service;
 import com.fixgateway.component.FixApplication;
 import com.fixgateway.model.FixSessionConfig;
 import com.fixgateway.model.FixSessionsProperties;
+import com.fixgateway.model.SessionAssignment;
 import com.fixgateway.store.HazelcastLogFactory;
 import com.fixgateway.store.HazelcastMessageStoreFactory;
+import com.hazelcast.core.EntryEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -24,7 +26,9 @@ public class FixSessionManager {
     private final FixApplication fixApplication;
     private final HazelcastMessageStoreFactory messageStoreFactory;
     private final HazelcastLogFactory logFactory;
-    private final SessionOwnershipService ownershipService;
+    private final ClusterStabilityService clusterStabilityService;
+    private final CoordinatorService coordinatorService;
+    private final SessionAssignmentService sessionAssignmentService;
     
     private final List<Acceptor> acceptors = new ArrayList<>();
     private final List<Initiator> initiators = new ArrayList<>();
@@ -44,29 +48,26 @@ public class FixSessionManager {
     }
 
     private void monitorOwnership() {
-        long now = System.currentTimeMillis();
-        for (FixSessionConfig config : sessionsProperties.getSessions()) {
-            SessionID sessionID = new SessionID(config.getFixVersion(),
-                    config.getSenderCompId(), config.getTargetCompId());
-
-            SessionOwnershipService.Ownership o = ownershipService.get(sessionID);
-
-            // No ownership info yet → do nothing
-            if (o == null) {
-                continue;
-            }
-
-            // Lease expired on remote owner -> stop local resources if any
-            if (!o.nodeId.equals(ownershipService.nodeId()) && o.leaseUntil < now) {
+        // Epoch‑based fencing: stop any session where local epoch != assignment epoch
+        for (SessionID sessionID : activeSessions) {
+            String sessionKey = SessionAssignmentService.sessionKey(findConfigBySessionId(sessionID));
+            if (sessionKey != null && !sessionAssignmentService.isEpochValid(sessionKey)) {
+                log.warn("Epoch mismatch detected for {}, stopping session", sessionID);
                 stopSession(sessionID);
-                continue;
-            }
-
-            // Renew lease if we are the owner
-            if (o.nodeId.equals(ownershipService.nodeId())) {
-                ownershipService.renew(sessionID);
+                sessionAssignmentService.removeLocalEpoch(sessionKey);
             }
         }
+    }
+
+    private FixSessionConfig findConfigBySessionId(SessionID sessionID) {
+        for (FixSessionConfig cfg : sessionsProperties.getSessions()) {
+            if (cfg.getFixVersion().equals(sessionID.getBeginString())
+                    && cfg.getSenderCompId().equals(sessionID.getSenderCompID())
+                    && cfg.getTargetCompId().equals(sessionID.getTargetCompID())) {
+                return cfg;
+            }
+        }
+        return null;
     }
 
     private void startSessionForConfig(FixSessionConfig config) {
@@ -94,21 +95,28 @@ public class FixSessionManager {
 
     private void stopSession(SessionID sessionID) {
         activeSessions.remove(sessionID);
+        // Stop ONLY acceptors/initiators that correspond to this session
         acceptors.removeIf(a -> {
-            try {
-                a.stop();
-            } catch (Exception e) {
-                log.warn("Error stopping acceptor for {}", sessionID, e);
+            boolean matches = a.getSessions().contains(sessionID);
+            if (matches) {
+                try {
+                    a.stop();
+                } catch (Exception e) {
+                    log.warn("Error stopping acceptor for {}", sessionID, e);
+                }
             }
-            return true;
+            return matches;
         });
         initiators.removeIf(i -> {
-            try {
-                i.stop();
-            } catch (Exception e) {
-                log.warn("Error stopping initiator for {}", sessionID, e);
+            boolean matches = i.getSessions().contains(sessionID);
+            if (matches) {
+                try {
+                    i.stop();
+                } catch (Exception e) {
+                    log.warn("Error stopping initiator for {}", sessionID, e);
+                }
             }
-            return true;
+            return matches;
         });
     }
 
@@ -116,48 +124,27 @@ public class FixSessionManager {
     public void initialize() {
         log.info("Initializing FIX Sessions...");
 
-        // Register for ownership events to start/stop FIX sessions
-        ownershipService.registerListener(new SessionOwnershipService.OwnershipListener() {
-            @Override
-            public void onOwnershipAcquired(String sessionKey) {
-                FixSessionConfig config = findConfig(sessionKey);
-                if (config != null) {
-                    log.info("Ownership acquired event received, starting FIX session {}", sessionKey);
-                    startSessionForConfig(config);
-                }
-            }
-
-            @Override
-            public void onOwnershipLost(String sessionKey) {
-                FixSessionConfig config = findConfig(sessionKey);
-                if (config != null) {
-                    SessionID sessionID = new SessionID(config.getFixVersion(),
-                        config.getSenderCompId(), config.getTargetCompId());
-                    log.info("Ownership lost event received, stopping FIX session {}", sessionKey);
-                    stopSession(sessionID);
-                }
-            }
-        });
-        
-        // Attempt initial ownership; actual startup is funneled through the same
-        // idempotent path used by Hazelcast ownership events
-        for (FixSessionConfig config : sessionsProperties.getSessions()) {
-            if (!config.isEnabled()) {
-                log.info("Session {} is disabled, skipping", config.getSessionId());
-                continue;
-            }
-            SessionID sessionID = new SessionID(config.getFixVersion(),
-                    config.getSenderCompId(), config.getTargetCompId());
-
-            if (ownershipService.tryAcquire(sessionID)) {
-                log.info("Initial ownership acquired for {}, starting session", config.getSessionId());
-                startSessionForConfig(config);
-            } else {
-                log.info("Node is not owner for {}, starting in standby mode", config.getSessionId());
-            }
+        // 1. Wait for cluster stability before any action
+        if (!clusterStabilityService.isStable()) {
+            log.info("Cluster not yet stable, deferring FIX session initialization");
+            // Schedule a retry check after a short delay
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+                .schedule(this::initialize, 5, java.util.concurrent.TimeUnit.SECONDS);
+            return;
         }
-        
-        log.info("FIX Session initialization complete. Acceptors: {}, Initiators: {}", 
+
+        // 2. Coordinator writes initial assignments if map is empty
+        if (coordinatorService.isCoordinator()) {
+            sessionAssignmentService.writeInitialAssignmentsIfEmpty();
+        }
+
+        // 3. Register assignment map listener to react to assignments
+        registerAssignmentMapListener();
+
+        // 4. Process any existing assignments (in case we joined after assignments were written)
+        processExistingAssignments();
+
+        log.info("FIX Session initialization complete. Acceptors: {}, Initiators: {}",
             acceptors.size(), initiators.size());
     }
 
@@ -169,6 +156,89 @@ public class FixSessionManager {
             }
         }
         return null;
+    }
+
+    private void registerAssignmentMapListener() {
+        sessionAssignmentService.getAssignmentMap().addEntryListener(
+            new com.hazelcast.map.listener.EntryAddedListener<Object, Object>() {
+                @Override
+                public void entryAdded(EntryEvent<Object, Object> event) {
+                    onAssignmentChanged((String) event.getKey(), (SessionAssignment) event.getValue());
+                }
+            },
+            true
+        );
+        sessionAssignmentService.getAssignmentMap().addEntryListener(
+            new com.hazelcast.map.listener.EntryUpdatedListener<Object, Object>() {
+                @Override
+                public void entryUpdated(EntryEvent<Object, Object> event) {
+                    onAssignmentChanged((String) event.getKey(), (SessionAssignment) event.getValue());
+                }
+            },
+            true
+        );
+        sessionAssignmentService.getAssignmentMap().addEntryListener(
+            new com.hazelcast.map.listener.EntryRemovedListener<Object, Object>() {
+                @Override
+                public void entryRemoved(EntryEvent<Object, Object> event) {
+                    onAssignmentRemoved((String) event.getKey());
+                }
+            },
+            true
+        );
+        log.info("Assignment map listener registered");
+    }
+
+    private void onAssignmentChanged(String sessionKey, SessionAssignment assignment) {
+        String localNodeId = coordinatorService.localNodeId();
+        if (assignment.isAssignedTo(localNodeId)) {
+            // This node is now assigned
+            log.info("Assignment detected for {} (epoch={}), starting FIX session", sessionKey, assignment.getEpoch());
+            sessionAssignmentService.setLocalEpoch(sessionKey, assignment.getEpoch());
+            FixSessionConfig config = findConfig(sessionKey);
+            if (config != null) {
+                startSessionForConfig(config);
+            } else {
+                log.warn("No config found for assigned session key: {}", sessionKey);
+            }
+        } else {
+            // This node is NOT assigned → stop if we were running it
+            log.debug("Assignment changed for {}, not assigned to this node, stopping if active", sessionKey);
+            FixSessionConfig config = findConfig(sessionKey);
+            if (config != null) {
+                SessionID sessionID = new SessionID(config.getFixVersion(),
+                    config.getSenderCompId(), config.getTargetCompId());
+                stopSession(sessionID);
+                sessionAssignmentService.removeLocalEpoch(sessionKey);
+            }
+        }
+    }
+
+    private void onAssignmentRemoved(String sessionKey) {
+        log.info("Assignment removed for {}, stopping session", sessionKey);
+        FixSessionConfig config = findConfig(sessionKey);
+        if (config != null) {
+            SessionID sessionID = new SessionID(config.getFixVersion(),
+                config.getSenderCompId(), config.getTargetCompId());
+            stopSession(sessionID);
+            sessionAssignmentService.removeLocalEpoch(sessionKey);
+        }
+    }
+
+    private void processExistingAssignments() {
+        for (FixSessionConfig config : sessionsProperties.getSessions()) {
+            if (!config.isEnabled()) {
+                continue;
+            }
+            String sessionKey = SessionAssignmentService.sessionKey(config);
+            SessionAssignment assignment = sessionAssignmentService.getAssignment(sessionKey);
+            if (assignment != null && assignment.isAssignedTo(coordinatorService.localNodeId())) {
+                log.info("Existing assignment found for {} (epoch={}), starting session",
+                    sessionKey, assignment.getEpoch());
+                sessionAssignmentService.setLocalEpoch(sessionKey, assignment.getEpoch());
+                startSessionForConfig(config);
+            }
+        }
     }
 
     private SessionSettings createSessionSettings(FixSessionConfig config) throws ConfigError {

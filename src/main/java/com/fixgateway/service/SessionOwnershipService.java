@@ -1,5 +1,6 @@
 package com.fixgateway.service;
 
+import com.fixgateway.service.SessionAssignmentService;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.map.IMap;
 import lombok.RequiredArgsConstructor;
@@ -10,7 +11,9 @@ import com.hazelcast.cluster.MembershipEvent;
 import com.hazelcast.cluster.MembershipListener;
 
 import java.time.Instant;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
@@ -20,11 +23,16 @@ public class SessionOwnershipService {
     private static final long LEASE_MILLIS = 10_000;
 
     private final HazelcastInstance hazelcastInstance;
+    private final SessionAssignmentService sessionAssignmentService;
+    private final CoordinatorService coordinatorService;
+    private final ClusterStabilityService clusterStabilityService;
     /**
      * Stable node identity based on Hazelcast member UUID.
      * This MUST be used for HA correctness.
      */
     private String nodeId;
+    
+    private final Set<String> pendingReassignments = ConcurrentHashMap.newKeySet();
 
     @jakarta.annotation.PostConstruct
     void initNodeId() {
@@ -52,6 +60,19 @@ public class SessionOwnershipService {
     @jakarta.annotation.PostConstruct
     void registerMembershipListener() {
         hazelcastInstance.getCluster().addMembershipListener(new OwnershipMembershipListener());
+        
+        // Register callback for when cluster becomes stable
+        clusterStabilityService.onClusterStable(() -> {
+            if (!coordinatorService.isCoordinator()) {
+                return;
+            }
+
+            for (String removedNodeId : pendingReassignments) {
+                log.warn("Reassigning sessions from departed node: {}", removedNodeId);
+                sessionAssignmentService.reassignSessionsFromNode(removedNodeId);
+            }
+            pendingReassignments.clear();
+        });
     }
 
     public boolean tryAcquire(SessionID sessionID) {
@@ -102,8 +123,11 @@ public class SessionOwnershipService {
         @Override
         public void memberRemoved(MembershipEvent event) {
             String removedNodeId = event.getMember().getUuid().toString();
-            log.warn("Cluster member {} removed, evaluating FIX session takeover", removedNodeId);
+            pendingReassignments.add(removedNodeId);
+            
+            log.warn("Member removed, deferring reassignment until cluster stable: {}", removedNodeId);
 
+            // Keep legacy lease‑based takeover for backward compatibility
             ownershipMap().forEach((sessionKey, ownership) -> {
                 if (ownership.nodeId.equals(removedNodeId)) {
                     long now = Instant.now().toEpochMilli();

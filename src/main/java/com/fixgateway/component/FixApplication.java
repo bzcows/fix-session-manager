@@ -1,6 +1,7 @@
 package com.fixgateway.component;
 
 import com.fixgateway.model.MessageEnvelope;
+import com.fixgateway.service.SessionAssignmentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.ProducerTemplate;
@@ -19,6 +20,7 @@ public class FixApplication implements Application {
     private final ProducerTemplate producerTemplate;
     private final org.apache.camel.CamelContext camelContext;
     private final com.fixgateway.service.SessionOwnershipService ownershipService;
+    private final SessionAssignmentService sessionAssignmentService;
     
     // Admin message types to filter
     private static final Set<String> ADMIN_MSG_TYPES = Set.of(
@@ -40,9 +42,11 @@ public class FixApplication implements Application {
     public void onLogon(SessionID sessionID) {
         log.info("FIX Session logged on: {}", sessionID);
 
-        // HA SAFETY: only the session owner may start Camel routes
-        if (!ownershipService.isOwner(sessionID)) {
-            log.info("Node is not owner for {}, skipping route startup", sessionID);
+        // Epoch fencing: ensure we are still the assigned node with correct epoch
+        String assignmentKey = sessionAssignmentKey(sessionID);
+        if (!sessionAssignmentService.isEpochValid(assignmentKey)) {
+            log.warn("Epoch mismatch on logon for {}, stopping session", sessionID);
+            // This will cause the session to stop via fencing
             return;
         }
 
@@ -59,11 +63,6 @@ public class FixApplication implements Application {
     @Override
     public void onLogout(SessionID sessionID) {
         log.info("FIX Session logged out: {}", sessionID);
-
-        // HA SAFETY: only owner manages routes
-        if (!ownershipService.isOwner(sessionID)) {
-            return;
-        }
 
         String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
         try {
@@ -88,8 +87,10 @@ public class FixApplication implements Application {
 
     @Override
     public void toApp(Message message, SessionID sessionID) throws DoNotSend {
-        // HA safety: only current owner may send application messages
-        if (!ownershipService.isOwner(sessionID)) {
+        // Epoch fencing: ensure we are still the assigned node with correct epoch
+        String assignmentKey = sessionAssignmentKey(sessionID);
+        if (!sessionAssignmentService.isEpochValid(assignmentKey)) {
+            log.warn("Epoch mismatch on toApp for {}, throwing DoNotSend", sessionID);
             throw new DoNotSend();
         }
         log.debug("Application message TO {}: {}", sessionID, message);
@@ -98,9 +99,10 @@ public class FixApplication implements Application {
     @Override
     public void fromApp(Message message, SessionID sessionID)
             throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
-        // HA safety: drop messages if this node lost ownership
-        if (!ownershipService.isOwner(sessionID)) {
-            log.debug("Node is not owner for {}, dropping message", sessionID);
+        // Epoch fencing: ensure we are still the assigned node with correct epoch
+        String assignmentKey = sessionAssignmentKey(sessionID);
+        if (!sessionAssignmentService.isEpochValid(assignmentKey)) {
+            log.warn("Epoch mismatch on fromApp for {}, dropping message", sessionID);
             return;
         }
         
@@ -192,5 +194,12 @@ public class FixApplication implements Application {
             log.error("Failed to ensure routes started for session {}", sessionKey, e);
             throw new RuntimeException("Failed to start routes for session " + sessionKey, e);
         }
+    }
+
+    /**
+     * Converts a SessionID to the assignment map key format.
+     */
+    private String sessionAssignmentKey(SessionID sessionID) {
+        return sessionID.getBeginString() + ":" + sessionID.getSenderCompID() + "->" + sessionID.getTargetCompID();
     }
 }
