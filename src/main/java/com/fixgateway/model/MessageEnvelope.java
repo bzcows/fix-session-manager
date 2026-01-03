@@ -1,5 +1,6 @@
 package com.fixgateway.model;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -26,6 +27,9 @@ public class MessageEnvelope {
     private String msgType;
     
     @JsonProperty("createdTimestamp")
+    @JsonFormat(shape = JsonFormat.Shape.STRING,
+                pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'",
+                timezone = "UTC")
     private Instant createdTimestamp;
     
     @JsonProperty("rawMessage")

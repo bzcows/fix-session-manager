@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.model.dataformat.JsonLibrary;
+import org.apache.camel.component.jackson.JacksonDataFormat;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import quickfix.Message;
@@ -23,6 +24,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
 
     private final FixSessionsProperties sessionsProperties;
     private final CamelContext camelContext;
+    private final JacksonDataFormat jsr310JacksonDataFormat;
     
     @Value("${kafka.bootstrap.servers:localhost:9092}")
     private String kafkaBootstrapServers;
@@ -138,32 +140,78 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         from(kafkaUri)
             .routeId(routeId)
             .autoStartup(false)
-            .log(LoggingLevel.INFO, "Received message from Kafka topic: " + outputTopic)
-            .unmarshal().json(JsonLibrary.Jackson, MessageEnvelope.class)
+            .log(LoggingLevel.INFO, "Received message from Kafka topic: " + outputTopic +": ${body}")
+            .unmarshal(jsr310JacksonDataFormat)
+            .log(LoggingLevel.DEBUG, "Unmarshalled envelope: ${body}")
             .process(exchange -> {
                 MessageEnvelope envelope = exchange.getIn().getBody(MessageEnvelope.class);
+                log.info("Processing Kafka→FIX message for session: {}, msgType: {}, timestamp: {}",
+                    envelope.getSessionId(), envelope.getMsgType(), envelope.getCreatedTimestamp());
+                
                 String rawMessage = envelope.getRawMessage();
-                
-                // Parse and send FIX message
-                SessionID sessionID = new SessionID(
-                    config.getFixVersion(),
-                    config.getSenderCompId(),
-                    config.getTargetCompId()
-                );
-                
-                Session session = Session.lookupSession(sessionID);
-                if (session == null) {
-                    throw new IllegalStateException("FIX session not found: " + sessionID);
+                if (rawMessage == null || rawMessage.trim().isEmpty()) {
+                    throw new IllegalStateException("Raw message is null or empty in envelope");
                 }
                 
+                // Try multiple session lookup strategies
+                Session session = null;
+                SessionID sessionID = null;
+                
+                // Strategy 1: Try parsing from envelope sessionId string
+                if (envelope.getSessionId() != null && !envelope.getSessionId().isEmpty()) {
+                    try {
+                        sessionID = new SessionID(envelope.getSessionId());
+                        session = Session.lookupSession(sessionID);
+                        log.debug("Session lookup by envelope sessionId '{}': {}",
+                            envelope.getSessionId(), session != null ? "FOUND" : "NOT FOUND");
+                    } catch (Exception e) {
+                        log.debug("Cannot parse SessionID from envelope: {}", envelope.getSessionId(), e);
+                    }
+                }
+                
+                // Strategy 2: Use config-based SessionID (original approach)
+                if (session == null) {
+                    sessionID = new SessionID(
+                        config.getFixVersion(),
+                        config.getSenderCompId(),
+                        config.getTargetCompId()
+                    );
+                    session = Session.lookupSession(sessionID);
+                    log.debug("Session lookup by config '{}-{}': {}",
+                        config.getSenderCompId(), config.getTargetCompId(),
+                        session != null ? "FOUND" : "NOT FOUND");
+                }
+                
+                // Strategy 3: Try with reversed sender/target
+                if (session == null) {
+                    sessionID = new SessionID(
+                        config.getFixVersion(),
+                        config.getTargetCompId(),
+                        config.getSenderCompId()
+                    );
+                    session = Session.lookupSession(sessionID);
+                    log.debug("Session lookup by swapped '{}-{}': {}",
+                        config.getTargetCompId(), config.getSenderCompId(),
+                        session != null ? "FOUND" : "NOT FOUND");
+                }
+                
+                if (session == null) {
+                    log.error("FIX session not found. Envelope sessionId: '{}'. Config: {}-{}",
+                        envelope.getSessionId(), config.getSenderCompId(), config.getTargetCompId());
+                    throw new IllegalStateException("FIX session not found: " + envelope.getSessionId());
+                }
+                
+                log.debug("Session found: {}, logged on: {}", sessionID, session.isLoggedOn());
+                
                 if (!session.isLoggedOn()) {
+                    log.error("FIX session found but not logged on: {}", sessionID);
                     throw new IllegalStateException("FIX session not logged on: " + sessionID);
                 }
                 
                 Message message = new Message(rawMessage);
                 session.send(message);
                 
-                log.info("Sent FIX message to session {}: {}", sessionID, envelope.getMsgType());
+                log.info("Successfully sent FIX message to session {}: msgType={}", sessionID, envelope.getMsgType());
             })
             .log(LoggingLevel.INFO, "Successfully forwarded message to FIX session");
     }

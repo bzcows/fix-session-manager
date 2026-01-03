@@ -3,6 +3,12 @@ spring:
     name: fix-session-manager
   config:
     import: optional:file:./config/fix-sessions.yaml
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      adjust-dates-to-context-time-zone: false
+      fail-on-unknown-properties: false
 
 server:
   port: 8080
@@ -34,7 +40,7 @@ logging:
     root: INFO
     com.fixgateway: DEBUG
     quickfix: INFO
-    org.apache.camel: INFO
+    org.apache.camel: DEBUG
   file:
     name: ./logs/fix-session-manager.log
   pattern:
