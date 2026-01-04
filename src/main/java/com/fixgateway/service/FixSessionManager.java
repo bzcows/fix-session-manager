@@ -282,9 +282,9 @@ public class FixSessionManager {
     }
 
     private void startAcceptor(FixSessionConfig config, SessionSettings settings) throws ConfigError {
-        log.info("Starting ACCEPTOR session: {}", config.getSessionId());
+        log.info("Starting THREADED ACCEPTOR session: {}", config.getSessionId());
         
-        SocketAcceptor acceptor = new SocketAcceptor(
+        ThreadedSocketAcceptor acceptor = new ThreadedSocketAcceptor(
             fixApplication,
             messageStoreFactory,
             settings,
@@ -295,7 +295,7 @@ public class FixSessionManager {
         acceptor.start();
         acceptors.add(acceptor);
         
-        log.info("ACCEPTOR session started: {} on {}:{}", 
+        log.info("THREADED ACCEPTOR session started: {} on {}:{}",
             config.getSessionId(), config.getHost(), config.getPort());
     }
 

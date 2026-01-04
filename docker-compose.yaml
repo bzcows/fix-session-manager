@@ -33,6 +33,24 @@ services:
     volumes:
       - redpanda_data:/var/lib/redpanda/data
 
+  postgres:
+    image: 'postgres:16-alpine'
+    container_name: fix-gateway-postgres
+    environment:
+      - POSTGRES_DB=fixgateway
+      - POSTGRES_USER=fixuser
+      - POSTGRES_PASSWORD=fixpass
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/main/resources/db/migration:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fixuser -d fixgateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   kafka-ui:
     image: 'provectuslabs/kafka-ui:latest'
     container_name: fix-gateway-kafka-ui
@@ -47,6 +65,8 @@ services:
 
 volumes:
   redpanda_data:
+    driver: local
+  postgres_data:
     driver: local
 
 networks:

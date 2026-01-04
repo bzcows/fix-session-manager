@@ -1,6 +1,7 @@
 package com.fixgateway.component;
 
 import com.fixgateway.model.MessageEnvelope;
+import com.fixgateway.service.FixMessageLogger;
 import com.fixgateway.service.SessionAssignmentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +22,7 @@ public class FixApplication implements Application {
     private final org.apache.camel.CamelContext camelContext;
     private final com.fixgateway.service.SessionOwnershipService ownershipService;
     private final SessionAssignmentService sessionAssignmentService;
+    private final FixMessageLogger fixMessageLogger;
     
     // Admin message types to filter
     private static final Set<String> ADMIN_MSG_TYPES = Set.of(
@@ -51,42 +53,70 @@ public class FixApplication implements Application {
         }
 
         String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
-        try {
-            camelContext.getRouteController().startRoute("fix-to-kafka-" + sessionKey);
-            camelContext.getRouteController().startRoute("kafka-to-fix-" + sessionKey);
-            log.info("Started Kafka routes for session {}", sessionKey);
-        } catch (Exception e) {
-            log.error("Failed to start Kafka routes for session {}", sessionKey, e);
+        synchronized(this) {
+            try {
+                camelContext.getRouteController().startRoute("fix-to-kafka-" + sessionKey);
+                camelContext.getRouteController().startRoute("kafka-to-fix-" + sessionKey);
+                log.info("Started Kafka routes for session {}", sessionKey);
+            } catch (Exception e) {
+                log.error("Failed to start Kafka routes for session {}", sessionKey, e);
+            }
         }
     }
 
     @Override
     public void onLogout(SessionID sessionID) {
         log.info("FIX Session logged out: {}", sessionID);
+        stopRoutesForSession(sessionID);
+    }
 
-        String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
-        try {
-            camelContext.getRouteController().stopRoute("fix-to-kafka-" + sessionKey);
-            camelContext.getRouteController().stopRoute("kafka-to-fix-" + sessionKey);
-            log.info("Stopped Kafka routes for session {}", sessionKey);
-        } catch (Exception e) {
-            log.warn("Failed to stop Kafka routes for session {}", sessionKey, e);
-        }
+    // Note: QuickFIX/J Application interface doesn't have onDisconnect() method
+    // Disconnect events are typically handled through session monitoring or
+    // by checking session state in fromAdmin() for reject messages
+    // This method can be called manually from session monitoring logic
+    public void onDisconnect(SessionID sessionID) {
+        log.warn("FIX Session disconnected: {}", sessionID);
+        stopRoutesForSession(sessionID);
     }
 
     @Override
     public void toAdmin(Message message, SessionID sessionID) {
+        // Log the outbound admin message
+        fixMessageLogger.logOutboundAdmin(sessionID, message, Instant.now());
         log.debug("Admin message TO {}: {}", sessionID, message);
     }
 
     @Override
-    public void fromAdmin(Message message, SessionID sessionID) 
+    public void fromAdmin(Message message, SessionID sessionID)
             throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
+        // Log the inbound admin message
+        fixMessageLogger.logInboundAdmin(sessionID, message, Instant.now());
         log.debug("Admin message FROM {}: {}", sessionID, message);
+        
+        try {
+            String msgType = message.getHeader().getString(MsgType.FIELD);
+            
+            // Handle session-level rejections that indicate disconnect
+            if (MsgType.REJECT.equals(msgType)) {
+                log.error("Session rejected: {}, stopping routes", sessionID);
+                stopRoutesForSession(sessionID);
+            }
+            
+            // Handle logon rejections
+            if (MsgType.LOGON.equals(msgType)) {
+                // Check if this is a reject logon (would throw RejectLogon exception)
+                // QuickFIX/J will throw RejectLogon if logon is rejected
+            }
+        } catch (FieldNotFound e) {
+            log.debug("No MsgType field in admin message from {}", sessionID);
+        }
     }
 
     @Override
     public void toApp(Message message, SessionID sessionID) throws DoNotSend {
+        // Log the outbound application message
+        fixMessageLogger.logOutboundApp(sessionID, message, Instant.now());
+        
         // Epoch fencing: ensure we are still the assigned node with correct epoch
         String assignmentKey = sessionAssignmentKey(sessionID);
         if (!sessionAssignmentService.isEpochValid(assignmentKey)) {
@@ -108,6 +138,9 @@ public class FixApplication implements Application {
         
         try {
             String msgType = message.getHeader().getString(MsgType.FIELD);
+            
+            // Log the inbound application message
+            fixMessageLogger.logInboundApp(sessionID, message, Instant.now());
             
             // Filter admin messages
             if (ADMIN_MSG_TYPES.contains(msgType)) {
@@ -169,30 +202,49 @@ public class FixApplication implements Application {
      * This handles the case where messages arrive before onLogon() is called.
      */
     private void ensureRoutesStarted(SessionID sessionID, String sessionKey) {
-        try {
-            String fixToKafkaRoute = "fix-to-kafka-" + sessionKey;
-            String kafkaToFixRoute = "kafka-to-fix-" + sessionKey;
-            
-            // Check if routes exist and are not started
-            boolean fixToKafkaStarted = camelContext.getRouteController().getRouteStatus(fixToKafkaRoute).isStarted();
-            boolean kafkaToFixStarted = camelContext.getRouteController().getRouteStatus(kafkaToFixRoute).isStarted();
-            
-            if (!fixToKafkaStarted || !kafkaToFixStarted) {
-                log.info("Routes not started for session {}, starting now (fixToKafka={}, kafkaToFix={})",
-                    sessionKey, fixToKafkaStarted, kafkaToFixStarted);
+        synchronized(this) {
+            try {
+                String fixToKafkaRoute = "fix-to-kafka-" + sessionKey;
+                String kafkaToFixRoute = "kafka-to-fix-" + sessionKey;
                 
-                if (!fixToKafkaStarted) {
-                    camelContext.getRouteController().startRoute(fixToKafkaRoute);
-                    log.info("Started route: {}", fixToKafkaRoute);
+                // Check if routes exist and are not started
+                boolean fixToKafkaStarted = camelContext.getRouteController().getRouteStatus(fixToKafkaRoute).isStarted();
+                boolean kafkaToFixStarted = camelContext.getRouteController().getRouteStatus(kafkaToFixRoute).isStarted();
+                
+                if (!fixToKafkaStarted || !kafkaToFixStarted) {
+                    log.info("Routes not started for session {}, starting now (fixToKafka={}, kafkaToFix={})",
+                        sessionKey, fixToKafkaStarted, kafkaToFixStarted);
+                    
+                    if (!fixToKafkaStarted) {
+                        camelContext.getRouteController().startRoute(fixToKafkaRoute);
+                        log.info("Started route: {}", fixToKafkaRoute);
+                    }
+                    if (!kafkaToFixStarted) {
+                        camelContext.getRouteController().startRoute(kafkaToFixRoute);
+                        log.info("Started route: {}", kafkaToFixRoute);
+                    }
                 }
-                if (!kafkaToFixStarted) {
-                    camelContext.getRouteController().startRoute(kafkaToFixRoute);
-                    log.info("Started route: {}", kafkaToFixRoute);
-                }
+            } catch (Exception e) {
+                log.error("Failed to ensure routes started for session {}", sessionKey, e);
+                throw new RuntimeException("Failed to start routes for session " + sessionKey, e);
             }
-        } catch (Exception e) {
-            log.error("Failed to ensure routes started for session {}", sessionKey, e);
-            throw new RuntimeException("Failed to start routes for session " + sessionKey, e);
+        }
+    }
+
+    /**
+     * Stops Camel routes for the given session.
+     * Used for logout, disconnect, and error scenarios.
+     */
+    private void stopRoutesForSession(SessionID sessionID) {
+        String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
+        synchronized(this) {
+            try {
+                camelContext.getRouteController().stopRoute("fix-to-kafka-" + sessionKey);
+                camelContext.getRouteController().stopRoute("kafka-to-fix-" + sessionKey);
+                log.info("Stopped Kafka routes for session {}", sessionKey);
+            } catch (Exception e) {
+                log.warn("Failed to stop Kafka routes for session {}", sessionKey, e);
+            }
         }
     }
 

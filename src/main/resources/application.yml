@@ -3,6 +3,26 @@ spring:
     name: fix-session-manager
   config:
     import: optional:file:./config/fix-sessions.yaml
+  datasource:
+    url: jdbc:postgresql://localhost:5432/fixgateway
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
   jackson:
     serialization:
       write-dates-as-timestamps: false
@@ -46,3 +66,21 @@ logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
     file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# FIX Message Logging Configuration
+fix:
+  logging:
+    enabled: true
+    async:
+      queue-capacity: 10000
+      batch-size: 100
+      flush-interval-ms: 1000
+      max-retries: 3
+      retry-delay-ms: 1000
+      backpressure-strategy: DROP_OLDEST
+    circuit-breaker:
+      enabled: true
+      failure-threshold: 5
+      timeout-ms: 5000
+      half-open-timeout-ms: 30000
+
