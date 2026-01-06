@@ -1,5 +1,7 @@
 package com.fixgateway.route;
 
+import com.fixgateway.component.DlqEnrichmentProcessor;
+import com.fixgateway.component.MessageOrderValidator;
 import com.fixgateway.model.FixSessionConfig;
 import com.fixgateway.model.FixSessionsProperties;
 import com.fixgateway.model.MessageEnvelope;
@@ -25,6 +27,8 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
     private final FixSessionsProperties sessionsProperties;
     private final CamelContext camelContext;
     private final JacksonDataFormat jsr310JacksonDataFormat;
+    private final DlqEnrichmentProcessor dlqEnrichmentProcessor;
+    private final MessageOrderValidator messageOrderValidator;
     
     @Value("${kafka.bootstrap.servers:localhost:9092}")
     private String kafkaBootstrapServers;
@@ -52,7 +56,8 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
             .redeliveryDelay(1000)
             .useExponentialBackOff()
             .logStackTrace(true)
-            .logExhausted(true));
+            .logExhausted(true)
+            .onPrepareFailure(dlqEnrichmentProcessor));
 
         // Create routes for each enabled session but DO NOT auto-start them.
         // Routes will be started only after the corresponding FIX session is fully logged on.
@@ -122,25 +127,36 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         // The error "Cannot invoke String.equals(Object) because this.key is null" occurs when
         // Kafka tries to find a transaction coordinator but transactional.id is not set
         
+        // CRITICAL: Configure for strict message ordering guarantees
+        // Process one message at a time to ensure FIFO ordering
         String kafkaUri = "kafka:" + outputTopic +
              "?brokers=" + brokers +
              "&groupId=fix-gateway-" + sessionKey +
              "&autoOffsetReset=earliest" +
-             "&maxPollRecords=100" +
+             "&maxPollRecords=1" +  // CRITICAL: Process one message at a time
              "&keyDeserializer=org.apache.kafka.common.serialization.StringDeserializer" +
              "&valueDeserializer=org.apache.kafka.common.serialization.StringDeserializer" +
              "&consumersCount=1" +
-             // DIAGNOSTIC: Explicitly disable producer idempotent features
-             // Setting enable.idempotence=false prevents the FindCoordinator NPE
+             // Add ordering guarantees
+             "&synchronous=true" +
+             "&allowManualCommit=false" +
+             "&breakOnFirstError=true" +
+             // Disable async processing
+             "&additionalProperties.max.poll.interval.ms=300000" +  // 5 minutes
+             "&additionalProperties.enable.auto.commit=false" +
              "&additionalProperties.enable.idempotence=false" +
              "&additionalProperties.acks=1";
-        
-        log.info("DIAGNOSTIC: Kafka consumer URI with idempotence disabled: {}", kafkaUri);
-        
+         
+        log.info("STRICT ORDERING: Kafka consumer URI configured for sequential processing: {}", kafkaUri);
+         
         from(kafkaUri)
             .routeId(routeId)
             .autoStartup(false)
+            // CRITICAL: Single-threaded processing for strict ordering
+            .threads(1).maxPoolSize(1)
             .log(LoggingLevel.INFO, "Received message from Kafka topic: " + outputTopic +": ${body}")
+            // Validate message ordering before processing
+            .process(messageOrderValidator)
             .unmarshal(jsr310JacksonDataFormat)
             .log(LoggingLevel.DEBUG, "Unmarshalled envelope: ${body}")
             .process(exchange -> {

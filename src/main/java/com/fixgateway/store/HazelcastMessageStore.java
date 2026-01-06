@@ -62,12 +62,19 @@ public class HazelcastMessageStore implements MessageStore {
 
     @Override
     public void incrNextSenderMsgSeqNum() throws IOException {
-        sequences.put(sessionPrefix + "sender", getNextSenderMsgSeqNum() + 1);
+        // Use Hazelcast atomic operation for sequence increments to prevent race conditions
+        sequences.compute(sessionPrefix + "sender", (key, current) -> {
+            if (current == null) return 2;
+            return current + 1;
+        });
     }
 
     @Override
     public void incrNextTargetMsgSeqNum() throws IOException {
-        sequences.put(sessionPrefix + "target", getNextTargetMsgSeqNum() + 1);
+        sequences.compute(sessionPrefix + "target", (key, current) -> {
+            if (current == null) return 2;
+            return current + 1;
+        });
     }
 
     @Override

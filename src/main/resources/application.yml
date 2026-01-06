@@ -45,6 +45,15 @@ management:
 kafka:
   bootstrap:
     servers: localhost:9092
+  # Strict ordering configuration for FIX message processing
+  consumer:
+    enable-auto-commit: false
+    auto-offset-reset: earliest
+    max-poll-records: 1  # CRITICAL: One message at a time for strict ordering
+    fetch-min-bytes: 1
+    fetch-max-wait-ms: 500
+    isolation-level: read_committed
+    max-poll-interval-ms: 300000  # 5 minutes for single message processing
 
 # Hazelcast OSS Configuration
 hazelcast:
@@ -54,13 +63,19 @@ hazelcast:
     enabled: true
     dir: ./data/hazelcast
     interval: 60000  # Backup every 60 seconds
+  # Message ordering tracking map
+  maps:
+    last-processed-offset:
+      backup-count: 1
+      time-to-live-seconds: 86400  # 24 hours - offsets expire after a day
+      max-idle-seconds: 3600  # 1 hour idle timeout
 
 logging:
   level:
     root: INFO
-    com.fixgateway: DEBUG
+    com.fixgateway: INFO
     quickfix: INFO
-    org.apache.camel: DEBUG
+    org.apache.camel: INFO
   file:
     name: ./logs/fix-session-manager.log
   pattern:

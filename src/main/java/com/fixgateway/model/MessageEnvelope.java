@@ -34,4 +34,19 @@ public class MessageEnvelope {
     
     @JsonProperty("rawMessage")
     private String rawMessage;
+    
+    @JsonProperty("errorMessage")
+    private String errorMessage;
+    
+    @JsonProperty("errorType")
+    private String errorType;
+    
+    @JsonProperty("errorTimestamp")
+    @JsonFormat(shape = JsonFormat.Shape.STRING,
+                pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'",
+                timezone = "UTC")
+    private Instant errorTimestamp;
+    
+    @JsonProperty("errorRouteId")
+    private String errorRouteId;
 }
