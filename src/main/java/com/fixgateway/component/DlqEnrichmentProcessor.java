@@ -38,6 +38,7 @@ public class DlqEnrichmentProcessor implements Processor {
                     .senderCompId(original.getSenderCompId())
                     .targetCompId(original.getTargetCompId())
                     .msgType(original.getMsgType())
+                    .clOrdID(original.getClOrdID())
                     .createdTimestamp(original.getCreatedTimestamp())
                     .rawMessage(original.getRawMessage())
                     .errorMessage(exception.getMessage())

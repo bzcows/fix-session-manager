@@ -26,6 +26,9 @@ public class MessageEnvelope {
     @JsonProperty("msgType")
     private String msgType;
     
+    @JsonProperty("clOrdID")
+    private String clOrdID;
+    
     @JsonProperty("createdTimestamp")
     @JsonFormat(shape = JsonFormat.Shape.STRING,
                 pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'",

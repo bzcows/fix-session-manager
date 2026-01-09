@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.ProducerTemplate;
 import org.springframework.stereotype.Component;
 import quickfix.*;
+import quickfix.field.ClOrdID;
 import quickfix.field.MsgType;
 
 import java.time.Instant;
@@ -152,12 +153,22 @@ public class FixApplication implements Application {
             String sessionKey = sessionID.getSenderCompID() + "-" + sessionID.getTargetCompID();
             ensureRoutesStarted(sessionID, sessionKey);
 
+            // Extract ClOrdID if present
+            String clOrdID = null;
+            try {
+                clOrdID = message.getString(ClOrdID.FIELD);
+            } catch (FieldNotFound e) {
+                // ClOrdID not present in this message, leave as null
+                log.debug("ClOrdID field not found in message from {}", sessionID);
+            }
+            
             // Create envelope
             MessageEnvelope envelope = MessageEnvelope.builder()
                 .sessionId(sessionID.toString())
                 .senderCompId(sessionID.getSenderCompID())
                 .targetCompId(sessionID.getTargetCompID())
                 .msgType(msgType)
+                .clOrdID(clOrdID)
                 .createdTimestamp(Instant.now())
                 .rawMessage(message.toString())
                 .build();
