@@ -6,6 +6,7 @@ A robust FIX protocol gateway with Kafka integration, built with Spring Boot, Ap
 
 - **Multi-Session Support**: Manage multiple FIX acceptor and initiator sessions
 - **Kafka Integration**: Bidirectional message flow between FIX and Kafka topics
+- **Content-Based Routing**: Route messages to specific Kafka partitions based on MVEL expressions
 - **Message Filtering**: Automatically filters administrative messages (heartbeats, logon/logout, etc.)
 - **State Persistence**: Hazelcast OSS in-memory storage with periodic disk backups
 - **Message Envelope**: Structured message format with metadata
@@ -30,6 +31,71 @@ FIX Session → Camel → Kafka Input Topic
 - **Input (FIX → Kafka)**: `fix.{senderCompId}.{targetCompId}.input`
 - **Output (Kafka → FIX)**: `fix.{senderCompId}.{targetCompId}.output`
 - **Dead Letter**: `fix.dlq`
+
+## Content-Based Routing
+
+The system supports content-based routing to specific Kafka partitions using MVEL expressions. Three partition strategies are available:
+
+### Partition Strategies
+
+1. **NONE** (default): No partition key is set, uses Kafka's default partition assignment
+2. **KEY**: Expression returns a key that will be hashed to determine partition
+3. **EXPR**: Expression returns an explicit partition number (0 to N-1)
+
+### Configuration Example
+
+```yaml
+fix:
+  sessions:
+    - sessionId: "FIX.4.4:GTWY->BANZ"
+      type: "ACCEPTOR"
+      senderCompId: "GTWY"
+      targetCompId: "BANZ"
+      # ... existing properties ...
+      inputPartitions: 3  # Create topic with 3 partitions
+      partitionStrategy: EXPR  # NONE, KEY, or EXPR
+      partitionExpression: |
+        // Example: Route based on MsgType and Symbol
+        if (MsgType == "D" && ClOrdID == "1" && Symbol == "MSFT") {
+          1  // Partition 1 for specific orders
+        } else {
+          2  // Partition 2 for all other messages
+        }
+```
+
+### Available FIX Fields for MVEL Expressions
+
+The following FIX message fields are available in the MVEL expression context:
+- `MsgType`, `ClOrdID`, `Symbol`, `Side`, `OrderQty`, `Price`, `OrdType`, `TimeInForce`, `HandlInst`
+- `SenderCompID`, `TargetCompID`, `MsgSeqNum`, `SendingTime`
+- `rawMessage` (the complete raw FIX message string)
+- `totalPartitions` (total number of partitions for the topic)
+
+### Expression Examples
+
+```java
+// KEY strategy: Use ClOrdID as partition key
+clOrdID
+
+// EXPR strategy: Simple type-based routing
+switch(MsgType) {
+    case "D": return 0;
+    case "8": return 1;
+    default: return 2;
+}
+
+// EXPR strategy: Complex conditional routing
+if (MsgType == "D" && Symbol == "MSFT") {
+    0
+} else if (MsgType == "D" && Symbol == "AAPL") {
+    1
+} else {
+    2
+}
+
+// KEY strategy: Composite key for better distribution
+Symbol + "-" + Side
+```
 
 ## Message Envelope Format
 
@@ -119,6 +185,7 @@ fix-session-manager/
 - **QuickFIX/J**: 2.3.1
 - **Hazelcast**: 5.5.0 (Open Source Edition ONLY - no enterprise features)
 - **Kafka**: Compatible with RedPanda
+- **MVEL2**: 2.5.0.Final (for expression evaluation)
 
 ## License
 

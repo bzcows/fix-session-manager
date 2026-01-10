@@ -74,8 +74,13 @@ logging:
   level:
     root: INFO
     com.fixgateway: INFO
+    com.fixgateway.config.PartitionExpressionValidator: INFO
     quickfix: INFO
     org.apache.camel: INFO
+    org.apache.kafka: WARN
+    kafka: WARN
+    org.apache.kafka.clients: WARN
+    org.apache.kafka.common: WARN
   file:
     name: ./logs/fix-session-manager.log
   pattern:

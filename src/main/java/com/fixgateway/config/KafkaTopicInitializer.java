@@ -46,11 +46,13 @@ public class KafkaTopicInitializer {
             String outputTopic = String.format("fix.%s.%s.output",
                 sessionConfig.getSenderCompId(), sessionConfig.getTargetCompId());
 
-            // Create topics with 1 partition and 1 replica (suitable for development)
-            topics.add(new NewTopic(inputTopic, 1, (short) 1));
+            // Use configurable partition count for input topic (output topic remains 1 partition)
+            int inputPartitions = sessionConfig.getInputPartitions();
+            topics.add(new NewTopic(inputTopic, inputPartitions, (short) 1));
             topics.add(new NewTopic(outputTopic, 1, (short) 1));
 
-            log.info("Preparing to create topics: {} and {}", inputTopic, outputTopic);
+            log.info("Preparing to create topics: {} ({} partitions) and {} (1 partition)",
+                    inputTopic, inputPartitions, outputTopic);
         }
 
         // Also create DLQ topic

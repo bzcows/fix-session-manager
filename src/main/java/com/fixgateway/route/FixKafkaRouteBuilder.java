@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.component.kafka.KafkaConstants;
 import org.apache.camel.model.dataformat.JsonLibrary;
 import org.apache.camel.component.jackson.JacksonDataFormat;
 import org.springframework.beans.factory.annotation.Value;
@@ -101,8 +102,56 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         from(directEndpoint)
             .routeId(routeId)
             .autoStartup(false)
-            .log(LoggingLevel.DEBUG, "Publishing inbound FIX message to Kafka topic: " + inputTopic)
-            .to(kafkaProducerUri);
+            .log(LoggingLevel.INFO, "Received message from Kafka topic: " + inputTopic +": ${body}")
+            // Set partition key from header if present (for content-based routing)
+            .process(exchange -> {
+               /*
+                Object partitionKey = exchange.getIn().getHeader(KafkaConstants.KEY);
+                Object partition = exchange.getIn().getHeader(KafkaConstants.PARTITION);
+                
+                if (partitionKey != null) {
+                    log.info("DIAGNOSTIC: Using partition key for routing: {} (type: {})", partitionKey,
+                        partitionKey.getClass().getSimpleName());
+                    
+                    // Calculate expected partition for debugging
+                    try {
+                        String keyString = partitionKey.toString();
+                        int hash = keyString.hashCode(); // Java's default hash
+                        int expectedPartition = Math.abs(hash) % config.getInputPartitions(); // Use config partitions
+                        log.info("DIAGNOSTIC: Key '{}' hash: {}, expected partition: {} (of {})",
+                            keyString, hash, expectedPartition, config.getInputPartitions());
+                    } catch (Exception e) {
+                        log.warn("DIAGNOSTIC: Could not calculate expected partition: {}", e.getMessage());
+                    }
+                } else {
+                    log.info("DIAGNOSTIC: No partition key header (KafkaConstants.KEY) found");
+                }
+                if (partition != null) {
+                    log.info("DIAGNOSTIC: Using explicit partition number: {} (type: {})", partition,
+                        partition.getClass().getSimpleName());
+                } else {
+                    log.info("DIAGNOSTIC: No partition number header (KafkaConstants.PARTITION) found");
+                }*/
+                
+                // Log all headers for debugging
+                log.debug("DIAGNOSTIC: All headers: {}", exchange.getIn().getHeaders());
+            })
+            .to(kafkaProducerUri)
+            // Add processor to log the actual partition after sending
+            .process(exchange -> {
+                // Try to get the partition from Kafka record metadata
+                Object kafkaPartition = exchange.getIn().getHeader("kafka.PARTITION");
+                Object kafkaOffset = exchange.getIn().getHeader("kafka.OFFSET");
+                Object kafkaTopic = exchange.getIn().getHeader("kafka.TOPIC");
+                
+                if (kafkaPartition != null) {
+                    log.info("DIAGNOSTIC: Message sent to Kafka - Topic: {}, Partition: {}, Offset: {}",
+                        kafkaTopic, kafkaPartition, kafkaOffset);
+                } else {
+                    log.info("DIAGNOSTIC: Message sent to Kafka - Topic: {} (partition/offset not available)",
+                        kafkaTopic);
+                }
+            });
 
         log.info("Inbound FIX messages must be sent to '{}' from FixApplication", directEndpoint);
     }
@@ -122,11 +171,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         // Use brokers parameter for Camel 4.x Kafka component
         String brokers = kafkaBootstrapServers != null ? kafkaBootstrapServers : "localhost:9092";
         
-        // Construct Kafka URI with correct parameters for Camel 4.14.0
-        // DIAGNOSTIC: Explicitly disable transactional features to prevent FindCoordinator NPE
-        // The error "Cannot invoke String.equals(Object) because this.key is null" occurs when
-        // Kafka tries to find a transaction coordinator but transactional.id is not set
-        
+       
         // CRITICAL: Configure for strict message ordering guarantees
         // Process one message at a time to ensure FIFO ordering
         String kafkaUri = "kafka:" + outputTopic +
@@ -154,7 +199,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
             .autoStartup(false)
             // CRITICAL: Single-threaded processing for strict ordering
             .threads(1).maxPoolSize(1)
-            .log(LoggingLevel.INFO, "Received message from Kafka topic: " + outputTopic +": ${body}")
+            .log(LoggingLevel.INFO, "Publish message from Kafka topic: " + outputTopic +": ${body}")
             // Validate message ordering before processing
             .process(messageOrderValidator)
             .unmarshal(jsr310JacksonDataFormat)

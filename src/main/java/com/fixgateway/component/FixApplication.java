@@ -1,17 +1,23 @@
 package com.fixgateway.component;
 
+import com.fixgateway.model.FixSessionConfig;
+import com.fixgateway.model.FixSessionsProperties;
 import com.fixgateway.model.MessageEnvelope;
+import com.fixgateway.model.PartitionStrategy;
 import com.fixgateway.service.FixMessageLogger;
+import com.fixgateway.service.MvelExpressionService;
 import com.fixgateway.service.SessionAssignmentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.ProducerTemplate;
+import org.apache.camel.component.kafka.KafkaConstants;
 import org.springframework.stereotype.Component;
 import quickfix.*;
 import quickfix.field.ClOrdID;
 import quickfix.field.MsgType;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.Set;
 
 @Slf4j
@@ -24,6 +30,8 @@ public class FixApplication implements Application {
     private final com.fixgateway.service.SessionOwnershipService ownershipService;
     private final SessionAssignmentService sessionAssignmentService;
     private final FixMessageLogger fixMessageLogger;
+    private final FixSessionsProperties sessionsProperties;
+    private final MvelExpressionService mvelExpressionService;
     
     // Admin message types to filter
     private static final Set<String> ADMIN_MSG_TYPES = Set.of(
@@ -173,6 +181,9 @@ public class FixApplication implements Application {
                 .rawMessage(message.toString())
                 .build();
 
+            // Get session configuration for partition routing
+            Optional<FixSessionConfig> sessionConfigOpt = findSessionConfig(sessionID);
+            
             // Send to direct endpoint (which routes to Kafka with proper brokers)
             String directEndpoint = String.format("direct:fix-inbound-%s-%s",
                 sessionID.getSenderCompID(), sessionID.getTargetCompID());
@@ -182,7 +193,32 @@ public class FixApplication implements Application {
             int attempts = 0;
             while (true) {
                 try {
-                    producerTemplate.sendBody(directEndpoint, envelope);
+                    // Evaluate partition expression if configured
+                    if (sessionConfigOpt.isPresent()) {
+                        FixSessionConfig config = sessionConfigOpt.get();
+                        log.info("Evaluating partition expression for session {}: strategy={}, expression={}, totalPartitions={}",
+                            config.getSessionId(), config.getPartitionStrategy(),
+                            config.getPartitionExpression() != null ? "present" : "null",
+                            config.getInputPartitions());
+                        
+                        Object partitionResult = evaluatePartitionExpression(config, message);
+                        
+                        if (partitionResult != null) {
+                            // Send with partition headers
+                            String headerName = getPartitionHeaderName(config.getPartitionStrategy());
+                            producerTemplate.sendBodyAndHeader(directEndpoint, envelope, headerName, partitionResult);
+                            log.info("Sent message with partition routing: strategy={}, result={}, header={}, endpoint={}",
+                                config.getPartitionStrategy(), partitionResult, headerName, directEndpoint);
+                        } else {
+                            // Send without partition headers (default behavior)
+                            producerTemplate.sendBody(directEndpoint, envelope);
+                            log.info("Sent message without partition routing (result was null): endpoint={}", directEndpoint);
+                        }
+                    } else {
+                        // No session config found, use default behavior
+                        producerTemplate.sendBody(directEndpoint, envelope);
+                        log.info("No session config found, sent message without partition routing: endpoint={}", directEndpoint);
+                    }
                     break;
                 } catch (org.apache.camel.CamelExecutionException e) {
                     Throwable cause = e.getCause();
@@ -264,5 +300,70 @@ public class FixApplication implements Application {
      */
     private String sessionAssignmentKey(SessionID sessionID) {
         return sessionID.getBeginString() + ":" + sessionID.getSenderCompID() + "->" + sessionID.getTargetCompID();
+    }
+    
+    /**
+     * Find session configuration by SessionID.
+     */
+    private Optional<FixSessionConfig> findSessionConfig(SessionID sessionID) {
+        return sessionsProperties.getSessions().stream()
+            .filter(config -> config.isEnabled())
+            .filter(config -> matchesSession(config, sessionID))
+            .findFirst();
+    }
+    
+    /**
+     * Check if session configuration matches the given SessionID.
+     */
+    private boolean matchesSession(FixSessionConfig config, SessionID sessionID) {
+        return config.getSenderCompId().equals(sessionID.getSenderCompID()) &&
+               config.getTargetCompId().equals(sessionID.getTargetCompID()) &&
+               config.getFixVersion().equals(sessionID.getBeginString());
+    }
+    
+    /**
+     * Evaluate partition expression for a message.
+     */
+    private Object evaluatePartitionExpression(FixSessionConfig config, Message message) {
+        try {
+            PartitionStrategy strategy = config.getPartitionStrategy();
+            String expression = config.getPartitionExpression();
+            int totalPartitions = config.getInputPartitions();
+            
+            if (strategy == PartitionStrategy.NONE || expression == null || expression.trim().isEmpty()) {
+                log.info("No partition expression to evaluate for session {}: strategy={}",
+                    config.getSessionId(), strategy);
+                return null;
+            }
+            
+            log.info("Calling MVEL expression service for session {}: strategy={}, expressionLength={}, totalPartitions={}",
+                config.getSessionId(), strategy, expression.length(), totalPartitions);
+            
+            Object result = mvelExpressionService.evaluatePartition(strategy, expression, message, totalPartitions);
+            
+            log.info("MVEL expression evaluation result for session {}: result={}, resultType={}",
+                config.getSessionId(), result, result != null ? result.getClass().getSimpleName() : "null");
+            
+            return result;
+            
+        } catch (Exception e) {
+            log.warn("Failed to evaluate partition expression for session {}: {}",
+                    config.getSessionId(), e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * Get the appropriate Kafka header name based on partition strategy.
+     */
+    private String getPartitionHeaderName(PartitionStrategy strategy) {
+        switch (strategy) {
+            case KEY:
+                return KafkaConstants.KEY;  // Key to be hashed (partition key)
+            case EXPR:
+                return KafkaConstants.PARTITION;  // Explicit partition number
+            default:
+                return null;
+        }
     }
 }

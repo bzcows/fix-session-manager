@@ -110,6 +110,13 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- MVEL2 for expression evaluation -->
+        <dependency>
+            <groupId>org.mvel</groupId>
+            <artifactId>mvel2</artifactId>
+            <version>2.5.0.Final</version>
+        </dependency>
+
         <!-- Jackson JSR-310 for Java 8 time support -->
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
