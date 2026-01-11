@@ -40,20 +40,31 @@ public class MessageOrderValidator implements Processor {
             return;
         }
         
-        Long lastOffset = lastProcessedMap.get(mapKey);
+        // Use atomic compute operation to prevent race conditions
+        // This ensures check-and-update happens atomically in Hazelcast
+        // Create final copies for use in lambda
+        final String finalSessionKey = sessionKey;
+        final Long finalCurrentOffset = currentOffset;
         
-        if (lastOffset != null && currentOffset <= lastOffset) {
-            log.error("OUT OF ORDER DETECTED: Session={}, CurrentOffset={}, LastOffset={}, Topic={}", 
-                     sessionKey, currentOffset, lastOffset, 
+        try {
+            lastProcessedMap.compute(mapKey, (key, existingOffset) -> {
+                if (existingOffset != null && finalCurrentOffset <= existingOffset) {
+                    // Throw RuntimeException to be caught and rethrown as IllegalStateException
+                    throw new RuntimeException(
+                        String.format("Message ordering violation detected for session %s. " +
+                                    "Current offset %d is not greater than last offset %d",
+                                    finalSessionKey, finalCurrentOffset, existingOffset));
+                }
+                // Atomically update to current offset
+                return finalCurrentOffset;
+            });
+            log.debug("Atomically updated last processed offset for session {}: {}", finalSessionKey, finalCurrentOffset);
+        } catch (RuntimeException e) {
+            // Unwrap the RuntimeException thrown in compute()
+            log.error("OUT OF ORDER DETECTED: Session={}, CurrentOffset={}, Topic={}",
+                     finalSessionKey, finalCurrentOffset,
                      exchange.getIn().getHeader("kafka.TOPIC", String.class));
-            throw new IllegalStateException(
-                String.format("Message ordering violation detected for session %s. " +
-                            "Current offset %d is not greater than last offset %d", 
-                            sessionKey, currentOffset, lastOffset));
+            throw new IllegalStateException(e.getMessage());
         }
-        
-        // Update last processed offset
-        lastProcessedMap.put(mapKey, currentOffset);
-        log.debug("Updated last processed offset for session {}: {}", sessionKey, currentOffset);
     }
 }

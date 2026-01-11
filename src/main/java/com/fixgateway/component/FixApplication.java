@@ -170,7 +170,7 @@ public class FixApplication implements Application {
                 log.debug("ClOrdID field not found in message from {}", sessionID);
             }
             
-            // Create envelope
+            // Create envelope with deduplication fields
             MessageEnvelope envelope = MessageEnvelope.builder()
                 .sessionId(sessionID.toString())
                 .senderCompId(sessionID.getSenderCompID())
@@ -180,6 +180,9 @@ public class FixApplication implements Application {
                 .createdTimestamp(Instant.now())
                 .rawMessage(message.toString())
                 .build();
+            
+            // Generate fingerprint for deduplication
+            envelope.generateFingerprint();
 
             // Get session configuration for partition routing
             Optional<FixSessionConfig> sessionConfigOpt = findSessionConfig(sessionID);

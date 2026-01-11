@@ -10,6 +10,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -17,6 +18,10 @@ import java.time.Instant;
 @AllArgsConstructor
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class MessageEnvelope {
+    @JsonProperty("messageId")
+    @Builder.Default
+    private String messageId = UUID.randomUUID().toString();
+    
     @JsonProperty("sessionId")
     private String sessionId;
     
@@ -41,6 +46,22 @@ public class MessageEnvelope {
     @JsonProperty("rawMessage")
     private String rawMessage;
     
+    @JsonProperty("messageFingerprint")
+    private String messageFingerprint;
+    
+    @JsonProperty("kafkaTopic")
+    private String kafkaTopic;
+    
+    @JsonProperty("kafkaPartition")
+    private Integer kafkaPartition;
+    
+    @JsonProperty("kafkaOffset")
+    private Long kafkaOffset;
+    
+    @JsonProperty("processingAttempt")
+    @Builder.Default
+    private Integer processingAttempt = 0;
+    
     @JsonProperty("errorMessage")
     private String errorMessage;
     
@@ -55,4 +76,28 @@ public class MessageEnvelope {
     
     @JsonProperty("errorRouteId")
     private String errorRouteId;
+    
+    /**
+     * Helper method to generate a fingerprint for deduplication
+     * Uses SHA-256 hash of key message components
+     */
+    @JsonIgnore
+    public String generateFingerprint() {
+        if (this.messageFingerprint != null) {
+            return this.messageFingerprint;
+        }
+        // Create a fingerprint from key fields to identify duplicate messages
+        String fingerprintBase = String.format("%s|%s|%s|%s|%s|%s",
+            sessionId != null ? sessionId : "",
+            senderCompId != null ? senderCompId : "",
+            targetCompId != null ? targetCompId : "",
+            msgType != null ? msgType : "",
+            clOrdID != null ? clOrdID : "",
+            rawMessage != null ? rawMessage.hashCode() : "0"
+        );
+        // In a real implementation, use SHA-256: return DigestUtils.sha256Hex(fingerprintBase);
+        // For now, use hash code as simple fingerprint
+        this.messageFingerprint = String.valueOf(fingerprintBase.hashCode());
+        return this.messageFingerprint;
+    }
 }

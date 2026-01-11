@@ -70,6 +70,15 @@ public class HazelcastConfig {
                 .setMaxIdleSeconds(0);
         config.addMapConfig(assignmentConfig);
 
+        // Message deduplication map with TTL (24 hours)
+        MapConfig deduplicationConfig = new MapConfig()
+                .setName("message-deduplication")
+                .setBackupCount(1)
+                .setAsyncBackupCount(0)
+                .setTimeToLiveSeconds(86400) // 24 hours
+                .setMaxIdleSeconds(43200); // 12 hours idle timeout
+        config.addMapConfig(deduplicationConfig);
+
         // Network configuration for single node (OSS)
         config.getNetworkConfig()
                 .setPort(5701)

@@ -32,8 +32,9 @@ public class DlqEnrichmentProcessor implements Processor {
             if (body instanceof MessageEnvelope && exception != null) {
                 MessageEnvelope original = (MessageEnvelope) body;
                 
-                // Create enriched envelope with error details
+                // Create enriched envelope with error details, preserving deduplication fields
                 MessageEnvelope enriched = MessageEnvelope.builder()
+                    .messageId(original.getMessageId())
                     .sessionId(original.getSessionId())
                     .senderCompId(original.getSenderCompId())
                     .targetCompId(original.getTargetCompId())
@@ -41,6 +42,11 @@ public class DlqEnrichmentProcessor implements Processor {
                     .clOrdID(original.getClOrdID())
                     .createdTimestamp(original.getCreatedTimestamp())
                     .rawMessage(original.getRawMessage())
+                    .messageFingerprint(original.getMessageFingerprint())
+                    .kafkaTopic(original.getKafkaTopic())
+                    .kafkaPartition(original.getKafkaPartition())
+                    .kafkaOffset(original.getKafkaOffset())
+                    .processingAttempt(original.getProcessingAttempt() != null ? original.getProcessingAttempt() + 1 : 1)
                     .errorMessage(exception.getMessage())
                     .errorType(exception.getClass().getName())
                     .errorTimestamp(Instant.now())
