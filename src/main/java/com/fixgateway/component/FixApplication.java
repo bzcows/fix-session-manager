@@ -14,6 +14,7 @@ import org.apache.camel.component.kafka.KafkaConstants;
 import org.springframework.stereotype.Component;
 import quickfix.*;
 import quickfix.field.ClOrdID;
+import quickfix.field.MsgSeqNum;
 import quickfix.field.MsgType;
 
 import java.time.Instant;
@@ -170,6 +171,16 @@ public class FixApplication implements Application {
                 log.debug("ClOrdID field not found in message from {}", sessionID);
             }
             
+            // Extract MsgSeqNum for FIX protocol sequence tracking
+            Integer msgSeqNum = null;
+            try {
+                msgSeqNum = message.getHeader().getInt(MsgSeqNum.FIELD);
+                log.debug("Extracted MsgSeqNum {} for session {}", msgSeqNum, sessionID);
+            } catch (FieldNotFound e) {
+                // MsgSeqNum should always be present in FIX messages, but handle gracefully
+                log.warn("MsgSeqNum field not found in message from {}", sessionID);
+            }
+            
             // Create envelope with deduplication fields
             MessageEnvelope envelope = MessageEnvelope.builder()
                 .sessionId(sessionID.toString())
@@ -177,11 +188,12 @@ public class FixApplication implements Application {
                 .targetCompId(sessionID.getTargetCompID())
                 .msgType(msgType)
                 .clOrdID(clOrdID)
+                .msgSeqNum(msgSeqNum)  // Add sequence number for protocol-level deduplication
                 .createdTimestamp(Instant.now())
                 .rawMessage(message.toString())
                 .build();
             
-            // Generate fingerprint for deduplication
+            // Generate fingerprint for deduplication (includes msgSeqNum)
             envelope.generateFingerprint();
 
             // Get session configuration for partition routing

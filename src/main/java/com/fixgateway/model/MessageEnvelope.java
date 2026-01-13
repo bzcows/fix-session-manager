@@ -37,6 +37,9 @@ public class MessageEnvelope {
     @JsonProperty("clOrdID")
     private String clOrdID;
     
+    @JsonProperty("msgSeqNum")
+    private Integer msgSeqNum;
+    
     @JsonProperty("createdTimestamp")
     @JsonFormat(shape = JsonFormat.Shape.STRING,
                 pattern = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'",
@@ -87,12 +90,14 @@ public class MessageEnvelope {
             return this.messageFingerprint;
         }
         // Create a fingerprint from key fields to identify duplicate messages
-        String fingerprintBase = String.format("%s|%s|%s|%s|%s|%s",
+        // Includes msgSeqNum for FIX protocol-level deduplication
+        String fingerprintBase = String.format("%s|%s|%s|%s|%s|%d|%s",
             sessionId != null ? sessionId : "",
             senderCompId != null ? senderCompId : "",
             targetCompId != null ? targetCompId : "",
             msgType != null ? msgType : "",
             clOrdID != null ? clOrdID : "",
+            msgSeqNum != null ? msgSeqNum : 0,
             rawMessage != null ? rawMessage.hashCode() : "0"
         );
         // In a real implementation, use SHA-256: return DigestUtils.sha256Hex(fingerprintBase);

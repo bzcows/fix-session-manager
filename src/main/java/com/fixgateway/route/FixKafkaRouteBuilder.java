@@ -1,6 +1,7 @@
 package com.fixgateway.route;
 
 import com.fixgateway.component.DlqEnrichmentProcessor;
+import com.fixgateway.component.MessageDeduplicationProcessor;
 import com.fixgateway.component.MessageOrderValidator;
 import com.fixgateway.model.FixSessionConfig;
 import com.fixgateway.model.FixSessionsProperties;
@@ -19,6 +20,7 @@ import quickfix.Session;
 import quickfix.SessionID;
 import com.fixgateway.service.SessionOwnershipService;
 import org.apache.camel.CamelContext;
+import org.apache.camel.Exchange;
 
 @Slf4j
 @Component
@@ -30,6 +32,7 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
     private final JacksonDataFormat jsr310JacksonDataFormat;
     private final DlqEnrichmentProcessor dlqEnrichmentProcessor;
     private final MessageOrderValidator messageOrderValidator;
+    private final MessageDeduplicationProcessor messageDeduplicationProcessor;
     
     @Value("${kafka.bootstrap.servers:localhost:9092}")
     private String kafkaBootstrapServers;
@@ -53,13 +56,25 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
         
         log.info("DIAGNOSTIC: DLQ URI with idempotence disabled: {}", dlqUri);
         
+        // Custom error handler that handles duplicate messages specially
         errorHandler(deadLetterChannel(dlqUri)
             .maximumRedeliveries(3)
             .redeliveryDelay(1000)
             .useExponentialBackOff()
             .logStackTrace(true)
             .logExhausted(true)
-            .onPrepareFailure(dlqEnrichmentProcessor));
+            .onPrepareFailure(dlqEnrichmentProcessor)
+            .onExceptionOccurred(exchange -> {
+                // Check if this is a duplicate message exception
+                Throwable cause = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Throwable.class);
+                if (cause != null && cause instanceof MessageDeduplicationProcessor.DuplicateMessageException) {
+                    // Mark exchange as handled to prevent DLQ routing
+                    exchange.setProperty(Exchange.ERRORHANDLER_HANDLED, true);
+                    // Don't redeliver duplicates
+                    exchange.setProperty(Exchange.REDELIVERY_EXHAUSTED, true);
+                    log.info("Duplicate message handled by error handler: {}", cause.getMessage());
+                }
+            }));
 
         // Create routes for each enabled session but DO NOT auto-start them.
         // Routes will be started only after the corresponding FIX session is fully logged on.
@@ -235,6 +250,8 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
             })
             .unmarshal(jsr310JacksonDataFormat)
             .log(LoggingLevel.DEBUG, "Unmarshalled envelope: ${body}")
+            // Apply deduplication check - will throw DuplicateMessageException if duplicate
+            .process(messageDeduplicationProcessor)
             .process(exchange -> {
                 MessageEnvelope envelope = exchange.getIn().getBody(MessageEnvelope.class);
                 
@@ -247,12 +264,12 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
                 if (kafkaPartition != null) envelope.setKafkaPartition(kafkaPartition);
                 if (kafkaOffset != null) envelope.setKafkaOffset(kafkaOffset);
                 
-                // Ensure fingerprint is generated
+                // Ensure fingerprint is generated (should already be done in deduplication processor)
                 if (envelope.getMessageFingerprint() == null) {
                     envelope.generateFingerprint();
                 }
                 
-                log.info("Processing Kafka→FIX message: session={}, msgType={}, fingerprint={}, offset={}",
+                log.info("Processing Kafka→FIX message (deduplication passed): session={}, msgType={}, fingerprint={}, offset={}",
                     envelope.getSessionId(), envelope.getMsgType(),
                     envelope.getMessageFingerprint(), envelope.getKafkaOffset());
                 
