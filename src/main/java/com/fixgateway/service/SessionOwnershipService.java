@@ -11,6 +11,7 @@ import com.hazelcast.cluster.MembershipEvent;
 import com.hazelcast.cluster.MembershipListener;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,7 @@ public class SessionOwnershipService {
     private String nodeId;
     
     private final Set<String> pendingReassignments = ConcurrentHashMap.newKeySet();
+    private final Map<String, String> removedNodeAddresses = new ConcurrentHashMap<>(); // nodeId -> address
 
     @jakarta.annotation.PostConstruct
     void initNodeId() {
@@ -63,7 +65,11 @@ public class SessionOwnershipService {
         
         // Register callback for when cluster becomes stable
         clusterStabilityService.onClusterStable(() -> {
+            log.info("Cluster stable callback triggered, coordinator={}, pendingReassignments={}",
+                coordinatorService.isCoordinator(), pendingReassignments.size());
+            
             if (!coordinatorService.isCoordinator()) {
+                log.debug("Not coordinator, skipping reassignment");
                 return;
             }
 
@@ -72,6 +78,7 @@ public class SessionOwnershipService {
                 sessionAssignmentService.reassignSessionsFromNode(removedNodeId);
             }
             pendingReassignments.clear();
+            removedNodeAddresses.clear();
         });
     }
 
@@ -123,13 +130,18 @@ public class SessionOwnershipService {
         @Override
         public void memberRemoved(MembershipEvent event) {
             String removedNodeId = event.getMember().getUuid().toString();
+            String removedAddress = event.getMember().getAddress().toString();
             pendingReassignments.add(removedNodeId);
+            removedNodeAddresses.put(removedNodeId, removedAddress);
             
-            log.warn("Member removed, deferring reassignment until cluster stable: {}", removedNodeId);
+            log.warn("DIAGNOSTIC: Member removed: {} (address: {}), deferring reassignment until cluster stable. pendingReassignments={}",
+                removedNodeId, removedAddress, pendingReassignments.size());
 
             // Keep legacy lease‑based takeover for backward compatibility
             ownershipMap().forEach((sessionKey, ownership) -> {
                 if (ownership.nodeId.equals(removedNodeId)) {
+                    log.info("DIAGNOSTIC: Session {} owned by removed node {}, attempting takeover",
+                        sessionKey, removedNodeId);
                     long now = Instant.now().toEpochMilli();
                     Ownership newOwnership = ownershipMap().compute(sessionKey, (k, existing) -> {
                         if (existing == null || existing.nodeId.equals(removedNodeId) || existing.leaseUntil < now) {
@@ -150,7 +162,32 @@ public class SessionOwnershipService {
 
         @Override
         public void memberAdded(MembershipEvent event) {
-            // no-op
+            String addedNodeId = event.getMember().getUuid().toString();
+            String addedAddress = event.getMember().getAddress().toString();
+            log.info("DIAGNOSTIC: Member added: {} (address: {}), total members now: {}",
+                addedNodeId, addedAddress, hazelcastInstance.getCluster().getMembers().size());
+            
+            // Check if a node previously removed from this same address is in pendingReassignments
+            // When a node restarts, it gets a new UUID but same address
+            // We should not reassign sessions from a node that has rejoined
+            for (Map.Entry<String, String> entry : removedNodeAddresses.entrySet()) {
+                String oldNodeId = entry.getKey();
+                String oldAddress = entry.getValue();
+                if (oldAddress.equals(addedAddress)) {
+                    log.warn("DIAGNOSTIC: Node rejoined at same address {} (old UUID: {}, new UUID: {}), removing old UUID from pendingReassignments",
+                        addedAddress, oldNodeId, addedNodeId);
+                    pendingReassignments.remove(oldNodeId);
+                    removedNodeAddresses.remove(oldNodeId);
+                    break;
+                }
+            }
+            
+            // Also check if the exact UUID is in pendingReassignments (for completeness)
+            if (pendingReassignments.contains(addedNodeId)) {
+                log.warn("DIAGNOSTIC: Rejoined node {} was in pendingReassignments, removing", addedNodeId);
+                pendingReassignments.remove(addedNodeId);
+                removedNodeAddresses.remove(addedNodeId);
+            }
         }
     }
 

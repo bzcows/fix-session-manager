@@ -185,6 +185,9 @@ public class SessionAssignmentService {
      * Uses rebalance quorum (>=1 member) for safety.
      */
     public void reassignSessionsFromNode(String removedNodeId) {
+        log.info("DIAGNOSTIC: reassignSessionsFromNode called for removedNodeId={}, isCoordinator={}, isStable={}",
+            removedNodeId, coordinatorService.isCoordinator(), clusterStabilityService.isStable());
+        
         if (!clusterStabilityService.isStable()) {
             log.warn("Cluster not stable, skipping reassignment");
             return;
@@ -205,6 +208,9 @@ public class SessionAssignmentService {
                 .sorted()
                 .toList();
 
+        log.info("DIAGNOSTIC: Current member IDs: {}", currentMemberIds);
+        log.info("DIAGNOSTIC: Assignment map size before reassignment: {}", assignmentMap.size());
+
         if (currentMemberIds.isEmpty()) {
             log.error("No remaining members, cannot reassign");
             return;
@@ -218,6 +224,8 @@ public class SessionAssignmentService {
         for (SessionAssignment a : assignmentMap.values()) {
             loadByNode.computeIfPresent(a.getAssignedNodeId(), (k, v) -> v + 1);
         }
+
+        log.info("DIAGNOSTIC: Load distribution before reassignment: {}", loadByNode);
 
         int reassigned = 0;
         for (Map.Entry<String, SessionAssignment> entry : assignmentMap.entrySet()) {
@@ -236,7 +244,7 @@ public class SessionAssignmentService {
                 loadByNode.computeIfPresent(newAssignedNodeId, (k, v) -> v + 1);
                 reassigned++;
 
-                log.info("Reassigned {} from {} -> {} (epoch {} -> {})",
+                log.info("DIAGNOSTIC: Reassigned {} from {} -> {} (epoch {} -> {})",
                         entry.getKey(), removedNodeId, newAssignedNodeId,
                         assignment.getEpoch(), newAssignment.getEpoch());
             }
@@ -244,6 +252,8 @@ public class SessionAssignmentService {
 
         if (reassigned > 0) {
             log.info("Reassigned {} sessions from removed node {}", reassigned, removedNodeId);
+        } else {
+            log.info("DIAGNOSTIC: No sessions needed reassignment from removed node {}", removedNodeId);
         }
     }
 

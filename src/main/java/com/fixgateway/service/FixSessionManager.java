@@ -51,10 +51,20 @@ public class FixSessionManager {
         // Epoch‑based fencing: stop any session where local epoch != assignment epoch
         for (SessionID sessionID : activeSessions) {
             String sessionKey = SessionAssignmentService.sessionKey(findConfigBySessionId(sessionID));
-            if (sessionKey != null && !sessionAssignmentService.isEpochValid(sessionKey)) {
-                log.warn("Epoch mismatch detected for {}, stopping session", sessionID);
-                stopSession(sessionID);
-                sessionAssignmentService.removeLocalEpoch(sessionKey);
+            if (sessionKey != null) {
+                SessionAssignment assignment = sessionAssignmentService.getAssignment(sessionKey);
+                long localEpoch = sessionAssignmentService.getLocalEpoch(sessionKey);
+                if (assignment != null) {
+                    log.debug("DIAGNOSTIC: monitorOwnership checking {}: localEpoch={}, assignmentEpoch={}, assignedToThisNode={}",
+                        sessionKey, localEpoch, assignment.getEpoch(), assignment.isAssignedTo(coordinatorService.localNodeId()));
+                }
+                
+                if (!sessionAssignmentService.isEpochValid(sessionKey)) {
+                    log.warn("DIAGNOSTIC: Epoch mismatch detected for {} (local={}, assignment={}), stopping session",
+                        sessionID, localEpoch, assignment != null ? assignment.getEpoch() : "null");
+                    stopSession(sessionID);
+                    sessionAssignmentService.removeLocalEpoch(sessionKey);
+                }
             }
         }
     }
@@ -191,7 +201,12 @@ public class FixSessionManager {
 
     private void onAssignmentChanged(String sessionKey, SessionAssignment assignment) {
         String localNodeId = coordinatorService.localNodeId();
-        if (assignment.isAssignedTo(localNodeId)) {
+        boolean isAssignedToThisNode = assignment.isAssignedTo(localNodeId);
+        
+        log.info("DIAGNOSTIC: onAssignmentChanged for {}: epoch={}, assignedToThisNode={}, localNodeId={}, assignedNodeId={}",
+            sessionKey, assignment.getEpoch(), isAssignedToThisNode, localNodeId, assignment.getAssignedNodeId());
+        
+        if (isAssignedToThisNode) {
             // This node is now assigned
             log.info("Assignment detected for {} (epoch={}), starting FIX session", sessionKey, assignment.getEpoch());
             sessionAssignmentService.setLocalEpoch(sessionKey, assignment.getEpoch());
@@ -203,7 +218,8 @@ public class FixSessionManager {
             }
         } else {
             // This node is NOT assigned → stop if we were running it
-            log.debug("Assignment changed for {}, not assigned to this node, stopping if active", sessionKey);
+            log.info("DIAGNOSTIC: Assignment changed for {}, not assigned to this node (assigned to {}), stopping if active",
+                sessionKey, assignment.getAssignedNodeId());
             FixSessionConfig config = findConfig(sessionKey);
             if (config != null) {
                 SessionID sessionID = new SessionID(config.getFixVersion(),

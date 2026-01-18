@@ -11,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.camel.LoggingLevel;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.component.kafka.KafkaConstants;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommit;
+import org.apache.camel.component.kafka.consumer.KafkaManualCommitFactory;
 import org.apache.camel.model.dataformat.JsonLibrary;
 import org.apache.camel.component.jackson.JacksonDataFormat;
 import org.springframework.beans.factory.annotation.Value;
@@ -73,6 +75,17 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
                     // Don't redeliver duplicates
                     exchange.setProperty(Exchange.REDELIVERY_EXHAUSTED, true);
                     log.info("Duplicate message handled by error handler: {}", cause.getMessage());
+                    
+                    // Commit offset for duplicate messages to prevent replay
+                    KafkaManualCommit manualCommit = exchange.getIn().getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
+                    if (manualCommit != null) {
+                        try {
+                            manualCommit.commit();
+                            log.debug("Committed offset for duplicate message to prevent replay");
+                        } catch (Exception e) {
+                            log.error("Failed to commit offset for duplicate message: {}", e.getMessage(), e);
+                        }
+                    }
                 }
             }));
 
@@ -338,11 +351,23 @@ public class FixKafkaRouteBuilder extends RouteBuilder {
                 
                 log.info("Successfully sent FIX message to session {}: msgType={}, fingerprint={}",
                     sessionID, envelope.getMsgType(), envelope.getMessageFingerprint());
+                
+                // Manual commit after successful processing
+                KafkaManualCommit manualCommit = exchange.getIn().getHeader(KafkaConstants.MANUAL_COMMIT, KafkaManualCommit.class);
+                if (manualCommit != null) {
+                    try {
+                        manualCommit.commit();
+                        log.debug("Manually committed Kafka offset for topic={}, partition={}, offset={}",
+                            kafkaTopic, kafkaPartition, kafkaOffset);
+                    } catch (Exception e) {
+                        log.error("Failed to manually commit Kafka offset: {}", e.getMessage(), e);
+                        // Don't throw - message was processed successfully, commit failure will cause replay
+                        // but deduplication will handle it
+                    }
+                } else {
+                    log.warn("No KafkaManualCommit available for manual commit");
+                }
             })
-            // Note: Manual commit is disabled due to Camel 4.x API changes
-            // With idempotent producer and deduplication, duplicates will be handled
-            // Kafka auto-commit is disabled (enable.auto.commit=false) and synchronous processing
-            // ensures at-least-once semantics with deduplication
             .log(LoggingLevel.INFO, "Successfully forwarded message to FIX session");
     }
 }
